@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+vectorstore/
+data/raw/*
+!data/raw/.gitkeep
+.device_choice.json
+.performance_mode.json
+.model_choice.json
+.groundedness_threshold.json
+labels.json
+data/labels.json
+.git/
+.screenshots/
+tests/
+*.md

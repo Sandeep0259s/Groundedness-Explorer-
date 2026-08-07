@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RAG · Groundedness Explorer</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">◆</span>
+        <span class="brand-name">Groundedness Explorer</span>
+      </div>
+
+      <section class="panel">
+        <div class="panel-title-row">
+          <h2 class="panel-title">Labels</h2>
+          <span class="ingest-badge" id="ingest-badge" hidden>
+            <span class="ingest-spinner" aria-hidden="true"></span> Ingesting…
+          </span>
+        </div>
+        <p class="panel-hint">
+          Organize documents into labeled collections — e.g. "resume" — so you
+          can scope search to just one instead of everything at once.
+          <strong>session</strong> is cleared automatically every time the
+          server restarts.
+        </p>
+
+        <form class="label-create-row" id="label-create-form">
+          <input type="text" id="new-label-input" placeholder="New label name" autocomplete="off" />
+          <button class="btn btn-secondary" type="submit">+ Add</button>
+        </form>
+
+        <div class="label-groups" id="label-groups"></div>
+      </section>
+
+      <section class="panel">
+        <h2 class="panel-title">Upload</h2>
+        <label class="field">
+          <span class="field-label">Add files to label</span>
+          <select id="upload-label-select"></select>
+        </label>
+
+        <label for="file-input" class="dropzone" id="dropzone">
+          <input
+            type="file"
+            id="file-input"
+            multiple
+            accept=".pdf,.txt,.md,.docx,.csv,.xlsx,.html,.htm,.png,.jpg,.jpeg,.bmp,.tiff,.tif,.webp,.mp4,.mov,.avi,.mkv,.webm,.mp3,.wav,.m4a,.flac,.ogg"
+            hidden
+          />
+          <span class="dropzone-icon" aria-hidden="true">⇪</span>
+          <span class="dropzone-text">Drop documents, images, audio, or video here<br />or click to browse</span>
+        </label>
+
+        <button class="btn btn-secondary" id="reingest-btn" type="button">
+          Re-ingest data/raw
+        </button>
+      </section>
+
+      <section class="panel">
+        <h2 class="panel-title">Retrieval settings</h2>
+        <label class="field">
+          <span class="field-label">Search within</span>
+          <select id="ask-label-select">
+            <option value="">All labels</option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="field-label">
+            Chunks to retrieve (top_k): <strong id="topk-value">4</strong>
+          </span>
+          <input type="range" id="topk" min="1" max="10" value="4" />
+        </label>
+      </section>
+
+      <section class="panel">
+        <h2 class="panel-title">Model</h2>
+        <p class="panel-hint">
+          Every model here comes from Ollama itself — nothing is hardcoded.
+          Pull or import any model (<code>ollama pull &lt;name&gt;</code> or
+          <code>ollama create my-model -f Modelfile</code>) and hit refresh to
+          pick it below.
+        </p>
+        <label class="field">
+          <span class="field-label">Answering model</span>
+          <div class="inline-control">
+            <select id="model-select"></select>
+            <button class="icon-btn" id="model-refresh-btn" type="button" title="Refresh model list">⟳</button>
+          </div>
+        </label>
+        <label class="field">
+          <span class="field-label">Image understanding model</span>
+          <div class="inline-control">
+            <select id="vision-model-select"></select>
+          </div>
+        </label>
+        <p class="panel-hint" id="vision-model-hint" hidden>
+          No vision-capable model is pulled yet — images will still be OCR'd,
+          but won't get a visual description or direct visual Q&amp;A. Pull
+          one (e.g. <code>ollama pull moondream</code>) and refresh.
+        </p>
+      </section>
+
+      <section class="panel">
+        <h2 class="panel-title">Performance</h2>
+        <p class="panel-hint">
+          Control how much of the machine's CPU/GPU the local models are
+          allowed to use — lower it if other programs need headroom, raise it
+          for faster answers.
+        </p>
+
+        <label class="field">
+          <span class="field-label">Compute device</span>
+          <select id="device-select"></select>
+        </label>
+
+        <label class="field">
+          <span class="field-label">CPU usage</span>
+          <select id="performance-select">
+            <option value="eco">Eco (leaves the most headroom for other apps)</option>
+            <option value="balanced">Balanced</option>
+            <option value="max">Max (fastest, uses all cores)</option>
+          </select>
+        </label>
+
+        <div class="stat-row">
+          <div class="stat-row-head"><span>CPU</span><span id="stat-cpu-value">–</span></div>
+          <span class="meter neutral"><span class="meter-fill info" id="stat-cpu-bar" style="width:0%"></span></span>
+        </div>
+        <div class="stat-row">
+          <div class="stat-row-head"><span>RAM</span><span id="stat-ram-value">–</span></div>
+          <span class="meter neutral"><span class="meter-fill info" id="stat-ram-bar" style="width:0%"></span></span>
+        </div>
+        <div class="stat-row" id="stat-gpu-row" hidden>
+          <div class="stat-row-head"><span id="stat-gpu-label">GPU</span><span id="stat-gpu-value">–</span></div>
+          <span class="meter neutral"><span class="meter-fill info" id="stat-gpu-bar" style="width:0%"></span></span>
+        </div>
+      </section>
+
+      <div class="sidebar-footer">
+        <span class="status-dot" id="status-dot" title="Backend status"></span>
+        <span id="status-text">Connecting…</span>
+        <button class="icon-btn" id="theme-toggle" type="button" aria-label="Toggle dark mode" title="Toggle dark mode">
+          <span id="theme-icon" aria-hidden="true">☾</span>
+        </button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="main-header">
+        <button class="icon-btn sidebar-toggle" id="sidebar-toggle" type="button" aria-label="Toggle sidebar">☰</button>
+        <div>
+          <h1>Ask your documents</h1>
+          <p class="subtitle">Every answer is checked against the retrieved context for groundedness.</p>
+        </div>
+        <button class="btn btn-secondary" id="new-chat-btn" type="button" title="Start a new conversation">
+          + New chat
+        </button>
+      </header>
+
+      <div class="chat" id="chat" role="log" aria-live="polite">
+        <div class="empty-state" id="empty-state">
+          <div class="empty-state-icon" aria-hidden="true">✦</div>
+          <h2>Nothing ingested yet</h2>
+          <p>Upload a document on the left, then ask a question about it.</p>
+        </div>
+      </div>
+
+      <form class="composer" id="composer">
+        <textarea
+          id="question-input"
+          class="composer-input"
+          placeholder="Ask a question about your documents…"
+          rows="1"
+          aria-label="Question"
+        ></textarea>
+        <button class="btn btn-primary composer-send" id="send-btn" type="submit">
+          Ask
+        </button>
+      </form>
+    </main>
+  </div>
+
+  <div class="toast-stack" id="toast-stack" aria-live="assertive"></div>
+
+  <template id="message-template">
+    <article class="message">
+      <div class="message-bubble"></div>
+    </article>
+  </template>
+
+  <template id="answer-template">
+    <article class="message message-assistant">
+      <div class="message-bubble">
+        <p class="answer-text"></p>
+
+        <div class="groundedness">
+          <span class="badge">
+            <span class="badge-icon" aria-hidden="true"></span>
+            <span class="badge-label"></span>
+            <span class="badge-score"></span>
+          </span>
+        </div>
+
+        <details class="collapsible sentence-breakdown">
+          <summary>Sentence-level breakdown</summary>
+          <ul class="sentence-list"></ul>
+        </details>
+
+        <details class="collapsible sources-block">
+          <summary>Sources</summary>
+          <ul class="source-list"></ul>
+        </details>
+      </div>
+    </article>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>

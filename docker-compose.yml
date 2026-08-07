@@ -1,0 +1,26 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - RAG_DEVICE=cpu
+    volumes:
+      - ./data/raw:/app/data/raw
+      - vectorstore:/app/vectorstore
+      - hf-cache:/root/.cache/huggingface
+    depends_on:
+      - ollama
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+
+volumes:
+  vectorstore:
+  hf-cache:
+  ollama-models:

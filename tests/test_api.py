@@ -1,0 +1,147 @@
+import time
+
+import pytest
+from fastapi.testclient import TestClient
+
+from src.rag.config import settings
+
+
+@pytest.fixture(scope="module")
+def client():
+    from src.api.main import app
+
+    with TestClient(app) as c:
+        yield c
+
+
+@pytest.fixture(scope="module")
+def ollama_available():
+    import ollama
+
+    try:
+        ollama.Client(host=settings.ollama_host).list()
+        return True
+    except Exception:
+        return False
+
+
+def _wait_for_job(client: TestClient, job_id: str, timeout: float = 30.0) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        job = client.get(f"/api/jobs/{job_id}").json()
+        if job["status"] in ("done", "error"):
+            return job
+        time.sleep(0.5)
+    raise TimeoutError(f"job {job_id} did not finish within {timeout}s")
+
+
+def test_health(client):
+    res = client.get("/api/health")
+    assert res.status_code == 200
+    assert res.json() == {"status": "ok"}
+
+
+def test_default_labels_present(client):
+    res = client.get("/api/labels")
+    names = {label["name"] for label in res.json()["labels"]}
+    assert "general" in names
+    assert "session" in names
+
+
+def test_create_list_delete_label(client):
+    res = client.post("/api/labels", json={"name": "coursework"})
+    assert res.status_code == 200
+    assert res.json()["name"] == "coursework"
+
+    names = {label["name"] for label in client.get("/api/labels").json()["labels"]}
+    assert "coursework" in names
+
+    res = client.delete("/api/labels/coursework")
+    assert res.status_code == 200
+    names = {label["name"] for label in res.json()["labels"]}
+    assert "coursework" not in names
+
+
+def test_cannot_delete_general_label(client):
+    res = client.delete("/api/labels/general")
+    assert res.status_code == 400
+
+
+def test_invalid_label_name_rejected(client):
+    res = client.post("/api/labels", json={"name": "has spaces"})
+    assert res.status_code == 400
+
+
+def test_upload_ingest_and_list_document(client):
+    content = b"The Great Wall of China is located in northern China."
+    res = client.post(
+        "/api/upload",
+        files={"files": ("wall.txt", content, "text/plain")},
+        data={"label": "geography"},
+    )
+    assert res.status_code == 200
+    job_id = res.json()["job_id"]
+
+    job = _wait_for_job(client, job_id)
+    assert job["status"] == "done"
+    assert job["results"][0]["chunks"] > 0
+
+    docs = client.get("/api/documents", params={"label": "geography"}).json()
+    sources = [s["source"] for s in docs["sources"]]
+    assert any("wall.txt" in s for s in sources)
+
+    client.delete("/api/labels/geography")
+
+
+def test_upload_rejects_unsupported_extension(client):
+    res = client.post("/api/upload", files={"files": ("notes.exe", b"binary", "application/octet-stream")})
+    assert res.status_code == 200
+    assert res.json()["skipped"][0]["error"] == "unsupported file type"
+
+
+def test_delete_single_document(client):
+    content = b"Temporary document for a delete test."
+    res = client.post("/api/upload", files={"files": ("temp.txt", content, "text/plain")})
+    job = _wait_for_job(client, res.json()["job_id"])
+    source = job["sources"][0]["source"] if job["sources"] else None
+    assert source is not None
+
+    res = client.request("DELETE", "/api/documents", params={"source": source})
+    assert res.status_code == 200
+    sources = [s["source"] for s in res.json()["sources"]]
+    assert source not in sources
+
+
+def test_ask_without_ingested_documents_is_graceful(client):
+    # A label with nothing in it should get a clear "no context" answer, not an error.
+    res = client.post("/api/ask", json={"question": "anything?", "label": "empty-label-xyz"})
+    assert res.status_code == 200
+    assert res.json()["groundedness"]["label"] == "unknown"
+
+
+def test_ask_empty_question_rejected(client):
+    res = client.post("/api/ask", json={"question": "   "})
+    assert res.status_code == 400
+
+
+def test_ask_and_multiturn_conversation(client, ollama_available):
+    if not ollama_available:
+        pytest.skip("Ollama is not running — skipping tests that need real LLM generation")
+
+    content = b"Mount Kilimanjaro is the tallest mountain in Africa, standing at 5895 metres."
+    upload = client.post("/api/upload", files={"files": ("mountain.txt", content, "text/plain")}, data={"label": "geo2"})
+    _wait_for_job(client, upload.json()["job_id"])
+
+    res1 = client.post("/api/ask", json={"question": "How tall is Mount Kilimanjaro?", "label": "geo2"})
+    assert res1.status_code == 200
+    body1 = res1.json()
+    assert "conversation_id" in body1
+
+    res2 = client.post("/api/ask", json={
+        "question": "Which continent is it on?",
+        "label": "geo2",
+        "conversation_id": body1["conversation_id"],
+    })
+    assert res2.status_code == 200
+
+    client.delete("/api/labels/geo2")
