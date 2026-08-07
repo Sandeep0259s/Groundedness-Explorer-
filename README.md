@@ -12,11 +12,13 @@ instead of just trusting the LLM. Documents are organized into user-defined
    boundaries, not arbitrary word offsets) and embedded with a local
    sentence-transformer model, then stored in a persistent Chroma vector
    database, tagged with whichever label you filed them under.
-2. **Retrieve + re-rank** — a question is embedded and the most similar
-   chunks are fetched from the vector store; a second, purpose-built
-   cross-encoder then re-scores those candidates for actual relevance and
-   narrows them down to the final top-k, which is more accurate than
-   embedding similarity alone.
+2. **Retrieve (hybrid) + re-rank** — a question is matched against the
+   vector store two ways at once: embedding similarity (catches
+   paraphrases) and BM25 keyword search (catches exact names, part
+   numbers, dates that embeddings often miss), merged by reciprocal rank
+   fusion. A second, purpose-built cross-encoder then re-scores those fused
+   candidates for actual relevance and narrows them down to the final
+   top-k — each stage catches what the previous one misses.
 3. **Ask** — a local LLM (via [Ollama](https://ollama.com)) generates an
    answer grounded in those chunks, aware of the recent conversation history
    for natural follow-up questions.
@@ -35,7 +37,7 @@ one if it finds it — see "GPU usage" below.
 | Type | Formats | Notes |
 |---|---|---|
 | Documents | `.pdf`, `.txt`, `.md`, `.docx`, `.html` | |
-| Spreadsheets | `.csv`, `.xlsx` | Rows converted to `key: value` text |
+| Spreadsheets | `.csv`, `.xlsx` | Rows flattened to text for retrieval; computation questions ("what's the total in column X") are answered by running a real pandas expression instead — see below |
 | Images | `.png`, `.jpg`, `.jpeg`, `.bmp`, `.tiff`, `.webp` | OCR via Tesseract + captioning via a vision model |
 | Video | `.mp4`, `.mov`, `.avi`, `.mkv`, `.webm` | Speech-to-text (faster-whisper) + 3 keyframes captioned via the vision model |
 | Audio | `.mp3`, `.wav`, `.m4a`, `.flac`, `.ogg` | Speech-to-text via faster-whisper |
@@ -252,6 +254,39 @@ which helps but doesn't erase the size difference). There's no universally
 ingest, switch to a larger vision model in the Model panel for a specific
 question you need answered accurately, and switch back after.
 
+## Structured-data Q&A for spreadsheets
+
+Chunk-and-retrieve treats a spreadsheet row as a flat sentence, which works
+for "what's in row 3" but not "what's the total of column X" — that needs a
+real aggregation over the actual data, not a retrieved text fragment. When
+the best-matching source for a question is a `.csv`/`.xlsx` file,
+`structured_qa.py` instead asks the active chat model to translate the
+question into a single pandas expression (given the real column names and a
+few sample rows), evaluates it against the actual DataFrame, and returns
+the computed result — tagged `answer_mode: "structured"` in the API and
+shown as "🧮 Answered by computing over the spreadsheet" in the UI.
+
+**Security note, stated plainly**: this executes model-generated code.
+`_safe_eval` runs it in a restricted namespace (only `df` and `pandas` are
+exposed, no builtins beyond a small allowlist) and rejects anything
+containing `import`, `__`, `open(`, `exec(`, `os.`/`sys.`, etc. before
+evaluating — but this is a **denylist plus a restricted namespace, not a
+real sandbox**: there's no process isolation or resource limit behind it.
+That's an accepted tradeoff for a local, single-user app talking to a local
+model you're already trusting to answer your questions — it should **not**
+be exposed to untrusted multi-tenant use without adding real sandboxing
+(e.g. running the eval in a resource-limited subprocess). `tests/test_structured_qa.py`
+has concrete examples of what it blocks.
+
+Groundedness scoring is skipped for structured answers and reported as
+`{"label": "computed", "overall_score": 1.0}` instead of run through the
+NLI scorer — comparing a bare number like `700` against a prose chunk isn't
+a meaningful entailment pair, and doing it anyway produced a consistently
+misleading "possibly hallucinated" score for answers that were, in fact,
+computed correctly. The real risk with this feature is a wrong *translation*
+of the question into code, which is a different failure mode than
+hallucination and isn't something the NLI scorer can measure.
+
 ## Memory safety
 
 A best-effort safety net, not an OS-level guarantee, but designed so a
@@ -323,7 +358,8 @@ src/
     vision.py              image captioning + visual Q&A via the active vision model
     hallucination.py      NLI-based groundedness/hallucination scorer
     text_utils.py         shared sentence splitting
-    pipeline.py           ties retrieval + rerank + generation + scoring + vision together
+    pipeline.py           ties retrieval + rerank + generation + scoring + vision + structured QA together
+    structured_qa.py        text-to-pandas Q&A for spreadsheet questions
     device.py             GPU detection, permission prompt, runtime device/perf switching
     system_stats.py        live CPU/RAM/GPU usage for the resource panel
     model_registry.py      discovers pulled Ollama models + their capabilities (no hardcoded names)
@@ -356,18 +392,20 @@ vectorstore/              persisted Chroma DB (gitignored)
 | `DELETE /api/labels/{name}` | Delete a label and its documents |
 | `POST /api/labels/{name}/clear` | Empty a label without deleting it |
 | `GET /api/documents` | List ingested documents (optionally `?label=`) |
+| `GET /api/documents/file?source=` | Serve an ingested image's raw bytes (for thumbnails) |
 | `DELETE /api/documents?source=` | Delete a single document |
-| `POST /api/upload` | Upload files (background job) into a label |
-| `POST /api/ingest` | Re-scan `data/raw/` (background job) |
+| `POST /api/upload` | Upload files (background job, with per-file `progress`) into a label |
+| `POST /api/ingest` | Re-scan `data/raw/` (background job, with per-file `progress`) |
 | `GET /api/jobs/{id}` | Poll a background job's status |
-| `POST /api/ask` | Ask a question (`label`, `conversation_id`, `model` optional) |
+| `POST /api/ask` | Ask a question (`label`, `conversation_id`, `model` optional); response includes `answer_mode` (`text`/`vision`/`vision_fallback`/`structured`) |
+| `POST /api/ask/stream` | Same as `/api/ask`, streamed as Server-Sent Events (`event: token` then `event: done`) |
 | `POST /api/conversations/{id}/clear` | Forget a conversation's history |
 | `GET /api/system/stats` | Live CPU/RAM/GPU usage, active device, performance mode |
 | `GET /api/system/devices` | List available compute devices (CPU + any detected GPU) |
 | `POST /api/system/device` | Switch device at runtime, reloads local models |
 | `GET/POST /api/system/performance` | Get/set CPU usage mode (`eco`/`balanced`/`max`) |
 | `GET /api/system/models` | List Ollama models with capabilities + active model per role |
-| `POST /api/system/model` | Set the active model for a role (`{"model", "role": "chat"\|"vision"}`) |
+| `POST /api/system/model` | Set the active model for a role (`{"model", "role": "chat"\|"vision_caption"\|"vision_answer"}`) |
 
 ## Roadmap / further improvements
 
@@ -428,3 +466,9 @@ effort-to-value for a student project:
   your own labeled sample for your report, not just this project's demo set.
 - Use `scripts/compare_models.py` to report answer quality, groundedness,
   and latency across models as an ablation.
+- **Hybrid retrieval ablation**: `vectorstore.py`'s `query()` (embeddings
+  only) and `query_hybrid()` (embeddings + BM25 via reciprocal rank fusion)
+  are both available, so you can report retrieval quality with and without
+  the BM25 leg on your own document set — `tests/test_hybrid_retrieval.py`
+  has a concrete, reproducible example (an exact part-number token that
+  embedding similarity alone ranks poorly but BM25 finds immediately).

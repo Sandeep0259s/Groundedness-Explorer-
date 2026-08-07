@@ -1,8 +1,17 @@
+import re
+
 import chromadb
+from rank_bm25 import BM25Okapi
 
 from .config import settings
 from .embeddings import get_embedder
 from .labels import DEFAULT_LABEL
+
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _tokenize(text: str) -> list[str]:
+    return _TOKEN_RE.findall(text.lower())
 
 
 class VectorStore:
@@ -21,14 +30,63 @@ class VectorStore:
         result = self.collection.query(query_embeddings=[embedding], n_results=top_k, where=where)
 
         hits = []
-        for doc, meta, dist in zip(result["documents"][0], result["metadatas"][0], result["distances"][0]):
+        ids = result["ids"][0] if result["ids"] else []
+        for doc_id, doc, meta, dist in zip(ids, result["documents"][0], result["metadatas"][0], result["distances"][0]):
             hits.append({
+                "id": doc_id,
                 "text": doc,
                 "source": meta.get("source", "unknown"),
                 "label": meta.get("label", DEFAULT_LABEL),
                 "distance": dist,
             })
         return hits
+
+    def _bm25_hits(self, question: str, label: str | None, top_k: int) -> list[dict]:
+        if self.count() == 0:
+            return []
+        where = {"label": label} if label else None
+        result = self.collection.get(where=where, include=["documents", "metadatas"])
+        ids, docs, metas = result["ids"], result["documents"], result["metadatas"]
+        if not docs:
+            return []
+
+        bm25 = BM25Okapi([_tokenize(d) for d in docs])
+        scores = bm25.get_scores(_tokenize(question))
+        ranked = sorted(range(len(docs)), key=lambda i: scores[i], reverse=True)[:top_k]
+        return [
+            {
+                "id": ids[i],
+                "text": docs[i],
+                "source": metas[i].get("source", "unknown"),
+                "label": metas[i].get("label", DEFAULT_LABEL),
+                "bm25_score": float(scores[i]),
+            }
+            for i in ranked
+        ]
+
+    def query_hybrid(self, question: str, top_k: int = settings.top_k, label: str | None = None) -> list[dict]:
+        """Combines embedding similarity with BM25 keyword search via
+        reciprocal rank fusion. Embeddings alone miss exact-token matches
+        (names, part numbers, dates) that keyword search catches; BM25 alone
+        misses paraphrases embeddings catch. Fusing by *rank* (their raw
+        scores live on incomparable scales — cosine distance vs. BM25 term
+        weight) is the standard, robust way to combine them."""
+        fetch_k = max(top_k * 2, top_k)
+        vector_hits = self.query(question, top_k=fetch_k, label=label)
+        bm25_hits = self._bm25_hits(question, label, fetch_k)
+
+        rrf_k = 60  # standard RRF damping constant
+        scores: dict[str, float] = {}
+        items: dict[str, dict] = {}
+        for rank, hit in enumerate(vector_hits):
+            scores[hit["id"]] = scores.get(hit["id"], 0.0) + 1.0 / (rrf_k + rank + 1)
+            items[hit["id"]] = hit
+        for rank, hit in enumerate(bm25_hits):
+            scores[hit["id"]] = scores.get(hit["id"], 0.0) + 1.0 / (rrf_k + rank + 1)
+            items.setdefault(hit["id"], hit)
+
+        ranked_ids = sorted(scores, key=lambda i: scores[i], reverse=True)[:top_k]
+        return [items[i] for i in ranked_ids]
 
     def count(self) -> int:
         return self.collection.count()

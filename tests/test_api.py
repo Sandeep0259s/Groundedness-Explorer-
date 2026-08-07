@@ -15,17 +15,6 @@ def client():
         yield c
 
 
-@pytest.fixture(scope="module")
-def ollama_available():
-    import ollama
-
-    try:
-        ollama.Client(host=settings.ollama_host).list()
-        return True
-    except Exception:
-        return False
-
-
 def _wait_for_job(client: TestClient, job_id: str, timeout: float = 30.0) -> dict:
     deadline = time.time() + timeout
     while time.time() < deadline:

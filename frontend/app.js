@@ -585,8 +585,14 @@ function addPendingAssistantMessage() {
 }
 
 function groundednessClass(label) {
-  return label === "grounded" ? "good" : "critical";
+  return label === "grounded" || label === "computed" ? "good" : "critical";
 }
+
+const GROUNDEDNESS_LABELS = {
+  grounded: "Grounded",
+  computed: "Computed",
+  unknown: "No context",
+};
 
 function renderAnswer(pendingNode, result) {
   const node = answerTemplate.content.cloneNode(true);
@@ -599,14 +605,14 @@ function renderAnswer(pendingNode, result) {
   const badge = article.querySelector(".badge");
   badge.classList.add(gClass);
   article.querySelector(".badge-icon").textContent = gClass === "good" ? "✓" : "⚠";
-  article.querySelector(".badge-label").textContent =
-    g.label === "grounded" ? "Grounded" : g.label === "unknown" ? "No context" : "Possibly hallucinated";
+  article.querySelector(".badge-label").textContent = GROUNDEDNESS_LABELS[g.label] || "Possibly hallucinated";
   article.querySelector(".badge-score").textContent = `${Math.round(g.overall_score * 100)}%`;
 
   const modeTag = article.querySelector(".answer-mode-tag");
   const modeLabels = {
     vision: "👁 Answered by looking at the image",
     vision_fallback: "📄 Image model unavailable — answered from its saved description",
+    structured: "🧮 Answered by computing over the spreadsheet",
   };
   if (modeLabels[result.answer_mode]) {
     modeTag.hidden = false;
