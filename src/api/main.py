@@ -1,8 +1,10 @@
+import json
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -14,12 +16,12 @@ from src.rag import system_stats
 from src.rag.config import settings
 from src.rag.embeddings import get_embedder
 from src.rag.hallucination import get_scorer
-from src.rag.ingest import SUFFIX_READERS, ingest, ingest_path
+from src.rag.ingest import SUFFIX_READERS, ingest_path, list_ingestible_paths
 from src.rag.labels import DEFAULT_LABEL
 from src.rag.memory_guard import InsufficientMemoryError, ensure_headroom
 from src.rag.pipeline import RAGPipeline
 from src.rag.reranker import get_reranker
-from src.rag.vision import active_vision_model
+from src.rag.vision import IMAGE_SUFFIXES, active_vision_model
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent.parent / "frontend"
 UPLOAD_READ_CHUNK = 1024 * 1024  # stream uploads instead of loading whole file into memory
@@ -69,12 +71,18 @@ class PerformanceRequest(BaseModel):
 
 class ModelRequest(BaseModel):
     model: str
-    role: str = "chat"  # "chat" or "vision" today; any new role just works
+    role: str = "chat"  # "chat", "vision_caption", or "vision_answer" today; any new role just works
 
 
 def _new_job() -> str:
     job_id = uuid.uuid4().hex
-    app.state.jobs[job_id] = {"status": "queued", "results": None, "sources": None, "error": None}
+    app.state.jobs[job_id] = {
+        "status": "queued",
+        "results": None,
+        "sources": None,
+        "error": None,
+        "progress": {"done": 0, "total": 0},
+    }
     return job_id
 
 
@@ -83,8 +91,17 @@ def _run_ingest_job(job_id: str):
     pipeline: RAGPipeline = app.state.pipeline
     job["status"] = "running"
     try:
-        count = ingest(settings.data_dir, store=pipeline.store)
-        job["chunks_ingested"] = count
+        paths = list_ingestible_paths(settings.data_dir)
+        job["progress"] = {"done": 0, "total": len(paths)}
+        total_chunks = 0
+        for path in paths:
+            try:
+                total_chunks += ingest_path(path, pipeline.store)
+            except InsufficientMemoryError as exc:
+                # One oversized/problem file shouldn't abort the whole batch.
+                print(f"Skipping {path.name}: {exc}")
+            job["progress"]["done"] += 1
+        job["chunks_ingested"] = total_chunks
         job["sources"] = pipeline.store.list_sources()
         job["status"] = "done"
     except Exception as exc:
@@ -96,8 +113,15 @@ def _run_upload_job(job_id: str, saved_paths: list[Path]):
     job = app.state.jobs[job_id]
     pipeline: RAGPipeline = app.state.pipeline
     job["status"] = "running"
+    job["progress"] = {"done": 0, "total": len(saved_paths)}
     try:
-        results = [{"filename": p.name, "chunks": ingest_path(p, pipeline.store)} for p in saved_paths]
+        results = []
+        for p in saved_paths:
+            try:
+                results.append({"filename": p.name, "chunks": ingest_path(p, pipeline.store)})
+            except InsufficientMemoryError as exc:
+                results.append({"filename": p.name, "chunks": 0, "error": str(exc)})
+            job["progress"]["done"] += 1
         job["results"] = results
         job["sources"] = pipeline.store.list_sources()
         job["status"] = "done"
@@ -123,6 +147,26 @@ def job_status(job_id: str):
 def documents(label: str | None = None):
     pipeline: RAGPipeline = app.state.pipeline
     return {"sources": pipeline.store.list_sources(label=label), "total_chunks": pipeline.store.count()}
+
+
+@app.get("/api/documents/file")
+def get_document_file(source: str):
+    """Serves an ingested image's raw bytes, so the UI can show the actual
+    picture next to its caption instead of text alone. Restricted to image
+    files under data_dir — the source path always comes from a real ingested
+    document, but resolving + checking containment still guards against a
+    caller passing an arbitrary path outside it."""
+    resolved = Path(source).resolve()
+    data_root = Path(settings.data_dir).resolve()
+    try:
+        resolved.relative_to(data_root)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid source path")
+    if resolved.suffix.lower() not in IMAGE_SUFFIXES:
+        raise HTTPException(status_code=415, detail="only image files can be served this way")
+    if not resolved.is_file():
+        raise HTTPException(status_code=404, detail="file not found")
+    return FileResponse(resolved)
 
 
 @app.delete("/api/documents")
@@ -274,6 +318,47 @@ def ask(request: AskRequest):
     return result
 
 
+@app.post("/api/ask/stream")
+def ask_stream(request: AskRequest):
+    """Same as /api/ask, but streams the answer as Server-Sent Events —
+    an `event: token` per piece of text as it's generated, then a single
+    `event: done` with the same sources/groundedness/answer_mode payload
+    /api/ask returns all at once. Groundedness can only be scored once the
+    full answer exists, so it's necessarily part of the final event, not
+    streamed incrementally."""
+    pipeline: RAGPipeline = app.state.pipeline
+    if not request.question.strip():
+        raise HTTPException(status_code=400, detail="question must not be empty")
+
+    conversation_id = request.conversation_id or uuid.uuid4().hex
+    history = app.state.conversations.setdefault(conversation_id, [])
+    top_k = request.top_k or settings.top_k
+
+    def event_source():
+        final_result = None
+        for kind, payload in pipeline.ask_stream(
+            request.question,
+            top_k=top_k,
+            label=request.label,
+            history=history[-MAX_HISTORY_TURNS * 2 :],
+            model=request.model,
+        ):
+            if kind == "token":
+                yield f"event: token\ndata: {json.dumps(payload)}\n\n"
+            else:
+                final_result = payload
+
+        final_result["conversation_id"] = conversation_id
+        yield f"event: done\ndata: {json.dumps(final_result)}\n\n"
+
+        history.append({"role": "user", "content": request.question})
+        history.append({"role": "assistant", "content": final_result["answer"]})
+        if len(history) > MAX_HISTORY_TURNS * 2:
+            del history[: -MAX_HISTORY_TURNS * 2]
+
+    return StreamingResponse(event_source(), media_type="text/event-stream")
+
+
 @app.post("/api/conversations/{conversation_id}/clear")
 def clear_conversation(conversation_id: str):
     app.state.conversations.pop(conversation_id, None)
@@ -338,9 +423,13 @@ def system_list_models():
         "models": models,
         "active": {
             "chat": model_prefs.load_active_model("chat", settings.ollama_model),
-            "vision": active_vision_model(),
+            "vision_caption": active_vision_model("caption"),
+            "vision_answer": active_vision_model("answer"),
         },
     }
+
+
+VALID_MODEL_ROLES = ("chat", "vision_caption", "vision_answer")
 
 
 @app.post("/api/system/model")
@@ -348,9 +437,9 @@ def system_set_model(request: ModelRequest):
     name = request.model.strip()
     if not name:
         raise HTTPException(status_code=400, detail="model name must not be empty")
-    if request.role not in ("chat", "vision"):
-        raise HTTPException(status_code=400, detail="role must be 'chat' or 'vision'")
-    # Both roles resolve their active model fresh on every call (see llm.py /
+    if request.role not in VALID_MODEL_ROLES:
+        raise HTTPException(status_code=400, detail=f"role must be one of {VALID_MODEL_ROLES}")
+    # Every role resolves its active model fresh on every call (see llm.py /
     # vision.py) — persisting the preference is all that's needed here, no
     # pipeline object to mutate or reload.
     model_prefs.save_active_model(request.role, name)

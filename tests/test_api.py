@@ -1,3 +1,4 @@
+import json
 import time
 
 import pytest
@@ -116,7 +117,19 @@ def test_ask_without_ingested_documents_is_graceful(client):
     # A label with nothing in it should get a clear "no context" answer, not an error.
     res = client.post("/api/ask", json={"question": "anything?", "label": "empty-label-xyz"})
     assert res.status_code == 200
-    assert res.json()["groundedness"]["label"] == "unknown"
+    body = res.json()
+    assert body["groundedness"]["label"] == "unknown"
+    assert body["answer_mode"] == "text"
+
+
+def test_documents_file_rejects_path_outside_data_dir(client):
+    res = client.get("/api/documents/file", params={"source": "../../../windows/win.ini"})
+    assert res.status_code == 400
+
+
+def test_documents_file_rejects_non_image(client):
+    res = client.get("/api/documents/file", params={"source": f"{settings.data_dir}/eiffel_tower.txt"})
+    assert res.status_code in (400, 415, 404)
 
 
 def test_ask_empty_question_rejected(client):
@@ -143,6 +156,31 @@ def test_ask_and_multiturn_conversation(client, ollama_available):
         "conversation_id": body1["conversation_id"],
     })
     assert res2.status_code == 200
+
+
+def test_ask_stream_emits_tokens_then_done(client, ollama_available):
+    if not ollama_available:
+        pytest.skip("Ollama is not running — skipping tests that need real LLM generation")
+
+    content = b"The Great Barrier Reef is located off the coast of Queensland, Australia."
+    upload = client.post("/api/upload", files={"files": ("reef.txt", content, "text/plain")}, data={"label": "geo3"})
+    _wait_for_job(client, upload.json()["job_id"])
+
+    with client.stream(
+        "POST", "/api/ask/stream", json={"question": "Where is the Great Barrier Reef?", "label": "geo3"}
+    ) as res:
+        assert res.status_code == 200
+        raw = "".join(res.iter_text())
+
+    assert "event: token" in raw
+    assert "event: done" in raw
+    done_payload = raw.split("event: done\ndata: ")[1].strip()
+    body = json.loads(done_payload)
+    assert body["answer"]
+    assert "groundedness" in body
+    assert "answer_mode" in body
+
+    client.delete("/api/labels/geo3")
 
     client.delete("/api/labels/geo2")
 
@@ -178,4 +216,5 @@ def test_system_models_endpoint_reports_capabilities_and_active(client, ollama_a
     if body["models"]:
         assert "capabilities" in body["models"][0]
     assert "chat" in body["active"]
-    assert "vision" in body["active"]
+    assert "vision_caption" in body["active"]
+    assert "vision_answer" in body["active"]

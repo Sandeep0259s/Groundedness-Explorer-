@@ -25,10 +25,12 @@ const toastStack = el("toast-stack");
 const messageTemplate = el("message-template");
 const answerTemplate = el("answer-template");
 const ingestBadge = el("ingest-badge");
+const ingestBadgeText = el("ingest-badge-text");
 const newChatBtn = el("new-chat-btn");
 const modelSelect = el("model-select");
 const modelRefreshBtn = el("model-refresh-btn");
-const visionModelSelect = el("vision-model-select");
+const visionCaptionSelect = el("vision-caption-select");
+const visionAnswerSelect = el("vision-answer-select");
 const visionModelHint = el("vision-model-hint");
 const deviceSelect = el("device-select");
 const performanceSelect = el("performance-select");
@@ -102,6 +104,10 @@ async function checkHealth() {
 /* ---------- labels + documents ---------- */
 function basename(path) {
   return path.split(/[\\/]/).pop();
+}
+
+function isImageSource(path) {
+  return /\.(png|jpe?g|bmp|tiff?|webp)$/i.test(path);
 }
 
 // Labels are the organizing unit; each carries its own document list. A
@@ -255,11 +261,14 @@ let activeIngestJobs = 0;
 function setIngesting(isIngesting) {
   activeIngestJobs = Math.max(0, activeIngestJobs + (isIngesting ? 1 : -1));
   ingestBadge.hidden = activeIngestJobs === 0;
+  if (activeIngestJobs === 0) ingestBadgeText.textContent = "Ingesting…";
 }
 
 // Ingestion runs as a background job on the server so large files don't block
 // the app — existing documents stay fully queryable while it runs. This polls
 // until the job finishes, then refreshes the document list automatically.
+// Images are the slow part (captioning takes real seconds per file), so the
+// badge shows live "done/total" progress rather than a bare spinner.
 function pollJob(jobId, { onDone, onError }) {
   const tick = async () => {
     let job;
@@ -270,6 +279,10 @@ function pollJob(jobId, { onDone, onError }) {
     } catch (err) {
       onError(err);
       return;
+    }
+
+    if (job.progress && job.progress.total > 0) {
+      ingestBadgeText.textContent = `Ingesting… (${job.progress.done}/${job.progress.total})`;
     }
 
     if (job.status === "done") {
@@ -456,13 +469,18 @@ async function refreshModels() {
 
     const visionModels = models.filter((m) => m.capabilities.includes("vision"));
     visionModelHint.hidden = visionModels.length > 0;
-    if (visionModels.length === 0) {
-      visionModelSelect.innerHTML = `<option value="">None available</option>`;
-      visionModelSelect.disabled = true;
-    } else {
-      visionModelSelect.disabled = false;
-      visionModelSelect.innerHTML = visionModels.map((m) => `<option value="${m.name}">${m.name}</option>`).join("");
-      if (active.vision) visionModelSelect.value = active.vision;
+    for (const [select, activeName] of [
+      [visionCaptionSelect, active.vision_caption],
+      [visionAnswerSelect, active.vision_answer],
+    ]) {
+      if (visionModels.length === 0) {
+        select.innerHTML = `<option value="">None available</option>`;
+        select.disabled = true;
+      } else {
+        select.disabled = false;
+        select.innerHTML = visionModels.map((m) => `<option value="${m.name}">${m.name}</option>`).join("");
+        if (activeName) select.value = activeName;
+      }
     }
   } catch (err) {
     showToast(`Could not list models: ${err.message}`, "error");
@@ -471,7 +489,9 @@ async function refreshModels() {
   }
 }
 
-async function setActiveModel(role, model, selectEl) {
+const ROLE_LABELS = { chat: "Answering", vision_caption: "Captioning", vision_answer: "Visual Q&A" };
+
+async function setActiveModel(role, model) {
   try {
     const res = await fetch("/api/system/model", {
       method: "POST",
@@ -479,7 +499,7 @@ async function setActiveModel(role, model, selectEl) {
       body: JSON.stringify({ model, role }),
     });
     if (!res.ok) throw new Error((await res.json()).detail || "failed to switch model");
-    showToast(`${role === "vision" ? "Vision" : "Answering"} model set to "${model}"`, "success");
+    showToast(`${ROLE_LABELS[role] || role} model set to "${model}"`, "success");
   } catch (err) {
     showToast(`Could not switch model: ${err.message}`, "error");
     refreshModels();
@@ -487,7 +507,8 @@ async function setActiveModel(role, model, selectEl) {
 }
 
 modelSelect.addEventListener("change", () => setActiveModel("chat", modelSelect.value));
-visionModelSelect.addEventListener("change", () => setActiveModel("vision", visionModelSelect.value));
+visionCaptionSelect.addEventListener("change", () => setActiveModel("vision_caption", visionCaptionSelect.value));
+visionAnswerSelect.addEventListener("change", () => setActiveModel("vision_answer", visionAnswerSelect.value));
 modelRefreshBtn.addEventListener("click", refreshModels);
 
 // Polls actual CPU/RAM/GPU load so the user can tell when it's worth raising
@@ -582,6 +603,16 @@ function renderAnswer(pendingNode, result) {
     g.label === "grounded" ? "Grounded" : g.label === "unknown" ? "No context" : "Possibly hallucinated";
   article.querySelector(".badge-score").textContent = `${Math.round(g.overall_score * 100)}%`;
 
+  const modeTag = article.querySelector(".answer-mode-tag");
+  const modeLabels = {
+    vision: "👁 Answered by looking at the image",
+    vision_fallback: "📄 Image model unavailable — answered from its saved description",
+  };
+  if (modeLabels[result.answer_mode]) {
+    modeTag.hidden = false;
+    modeTag.textContent = modeLabels[result.answer_mode];
+  }
+
   const sentenceList = article.querySelector(".sentence-list");
   const sentenceBlock = article.querySelector(".sentence-breakdown");
   if (g.sentences.length === 0) {
@@ -615,11 +646,15 @@ function renderAnswer(pendingNode, result) {
       const li = document.createElement("li");
       li.className = "source-item";
       li.dataset.sourceIndex = index;
+      const thumb = isImageSource(hit.source)
+        ? `<img class="source-item-thumb" src="/api/documents/file?source=${encodeURIComponent(hit.source)}" alt="${basename(hit.source)}" loading="lazy" />`
+        : "";
       li.innerHTML = `
         <div class="source-item-head">
           <span>${basename(hit.source)}</span>
           <span>distance ${hit.distance.toFixed(3)}</span>
         </div>
+        ${thumb}
         <div class="source-item-text">${hit.text}</div>
       `;
       sourceList.appendChild(li);
@@ -643,13 +678,35 @@ function renderAnswer(pendingNode, result) {
   scrollToBottom();
 }
 
+// Parses one Server-Sent-Events buffer into {event, data} pairs as they
+// complete (an SSE event ends at a blank line) — fetch's streaming body
+// gives raw byte chunks that don't line up with event boundaries, so this
+// buffers partial events across reads instead of assuming one chunk = one event.
+function parseSseEvents(buffer) {
+  const events = [];
+  let sep;
+  while ((sep = buffer.indexOf("\n\n")) !== -1) {
+    const raw = buffer.slice(0, sep);
+    buffer = buffer.slice(sep + 2);
+    let type = "message";
+    let data = "";
+    for (const line of raw.split("\n")) {
+      if (line.startsWith("event: ")) type = line.slice(7).trim();
+      else if (line.startsWith("data: ")) data = line.slice(6);
+    }
+    if (data) events.push({ type, data });
+  }
+  return { events, rest: buffer };
+}
+
 async function askQuestion(question) {
   addUserMessage(question);
   const pending = addPendingAssistantMessage();
+  const bubble = pending.querySelector(".message-bubble");
 
   sendBtn.disabled = true;
   try {
-    const res = await fetch("/api/ask", {
+    const res = await fetch("/api/ask/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -659,10 +716,40 @@ async function askQuestion(question) {
         conversation_id: conversationId,
       }),
     });
-    if (!res.ok) throw new Error(await res.text());
-    const result = await res.json();
-    conversationId = result.conversation_id || conversationId;
-    renderAnswer(pending, result);
+    if (!res.ok || !res.body) throw new Error(await res.text());
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let streamedText = "";
+    let startedStreaming = false;
+    let finalResult = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const parsed = parseSseEvents(buffer);
+      buffer = parsed.rest;
+      for (const { type, data } of parsed.events) {
+        if (type === "token") {
+          if (!startedStreaming) {
+            startedStreaming = true;
+            bubble.textContent = "";
+          }
+          streamedText += JSON.parse(data);
+          bubble.textContent = streamedText;
+          scrollToBottom();
+        } else if (type === "done") {
+          finalResult = JSON.parse(data);
+        }
+      }
+    }
+
+    if (!finalResult) throw new Error("stream ended without a result");
+    conversationId = finalResult.conversation_id || conversationId;
+    renderAnswer(pending, finalResult);
   } catch (err) {
     pending.classList.remove("pending");
     pending.querySelector(".message-bubble").textContent =

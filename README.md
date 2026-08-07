@@ -37,7 +37,7 @@ one if it finds it — see "GPU usage" below.
 | Documents | `.pdf`, `.txt`, `.md`, `.docx`, `.html` | |
 | Spreadsheets | `.csv`, `.xlsx` | Rows converted to `key: value` text |
 | Images | `.png`, `.jpg`, `.jpeg`, `.bmp`, `.tiff`, `.webp` | OCR via Tesseract + captioning via a vision model |
-| Video | `.mp4`, `.mov`, `.avi`, `.mkv`, `.webm` | Speech-to-text via faster-whisper |
+| Video | `.mp4`, `.mov`, `.avi`, `.mkv`, `.webm` | Speech-to-text (faster-whisper) + 3 keyframes captioned via the vision model |
 | Audio | `.mp3`, `.wav`, `.m4a`, `.flac`, `.ogg` | Speech-to-text via faster-whisper |
 
 A scanned/image-only PDF automatically falls back to OCR too.

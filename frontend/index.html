@@ -18,7 +18,8 @@
         <div class="panel-title-row">
           <h2 class="panel-title">Labels</h2>
           <span class="ingest-badge" id="ingest-badge" hidden>
-            <span class="ingest-spinner" aria-hidden="true"></span> Ingesting…
+            <span class="ingest-spinner" aria-hidden="true"></span>
+            <span id="ingest-badge-text">Ingesting…</span>
           </span>
         </div>
         <p class="panel-hint">
@@ -92,11 +93,22 @@
           </div>
         </label>
         <label class="field">
-          <span class="field-label">Image understanding model</span>
+          <span class="field-label">Vision model — captioning (at upload)</span>
           <div class="inline-control">
-            <select id="vision-model-select"></select>
+            <select id="vision-caption-select"></select>
           </div>
         </label>
+        <label class="field">
+          <span class="field-label">Vision model — answering (when asked)</span>
+          <div class="inline-control">
+            <select id="vision-answer-select"></select>
+          </div>
+        </label>
+        <p class="panel-hint">
+          A small model can be fast at captioning but unreliable at direct
+          questions (or vice versa) — kept separate so you can pick a quick
+          model for bulk uploads and a slower, more careful one for questions.
+        </p>
         <p class="panel-hint" id="vision-model-hint" hidden>
           No vision-capable model is pulled yet — images will still be OCR'd,
           but won't get a visual description or direct visual Q&amp;A. Pull
@@ -203,6 +215,7 @@
             <span class="badge-label"></span>
             <span class="badge-score"></span>
           </span>
+          <span class="answer-mode-tag" hidden></span>
         </div>
 
         <details class="collapsible sentence-breakdown">

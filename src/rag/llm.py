@@ -1,3 +1,5 @@
+from collections.abc import Iterator
+
 import ollama
 
 from . import model_prefs
@@ -15,13 +17,7 @@ class OllamaLLM:
     def __init__(self, host: str = settings.ollama_host):
         self.client = ollama.Client(host=host)
 
-    def generate(
-        self,
-        question: str,
-        context_chunks: list[str],
-        history: list[dict] | None = None,
-        model: str | None = None,
-    ) -> str:
+    def _build_messages(self, question: str, context_chunks: list[str], history: list[dict] | None) -> list[dict]:
         context = "\n\n".join(f"[{i+1}] {chunk}" for i, chunk in enumerate(context_chunks))
         prompt = f"Context:\n{context}\n\nQuestion: {question}\n\nAnswer using only the context above:"
 
@@ -29,9 +25,32 @@ class OllamaLLM:
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": prompt})
+        return messages
 
+    def _active_model(self, model: str | None) -> str:
         # No model stored on self — resolved fresh so a switch made via the
         # Model panel takes effect on the very next question, no reload.
-        active = model or model_prefs.load_active_model("chat", settings.ollama_model)
-        response = self.client.chat(model=active, messages=messages)
+        return model or model_prefs.load_active_model("chat", settings.ollama_model)
+
+    def generate(
+        self,
+        question: str,
+        context_chunks: list[str],
+        history: list[dict] | None = None,
+        model: str | None = None,
+    ) -> str:
+        messages = self._build_messages(question, context_chunks, history)
+        response = self.client.chat(model=self._active_model(model), messages=messages)
         return response["message"]["content"]
+
+    def generate_stream(
+        self,
+        question: str,
+        context_chunks: list[str],
+        history: list[dict] | None = None,
+        model: str | None = None,
+    ) -> Iterator[str]:
+        messages = self._build_messages(question, context_chunks, history)
+        for chunk in self.client.chat(model=self._active_model(model), messages=messages, stream=True):
+            if chunk.message.content:
+                yield chunk.message.content

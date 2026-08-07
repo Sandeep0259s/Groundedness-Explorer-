@@ -78,11 +78,71 @@ def _get_whisper_model():
     return WhisperModel("base", device=whisper_device, compute_type=compute_type)
 
 
+VIDEO_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+KEYFRAME_COUNT = 3  # evenly spaced across the video, not just the first second
+
+
+def _extract_keyframes(path: Path, count: int = KEYFRAME_COUNT) -> list[bytes]:
+    """Grabs `count` evenly-spaced frames as JPEG bytes, so a silent or
+    visually-heavy video (slides, a diagram walkthrough) has something
+    searchable beyond its speech transcript. Best-effort: any decode failure
+    just means fewer (or zero) frames, never a failed ingest."""
+    import av
+
+    frames = []
+    try:
+        with av.open(str(path)) as container:
+            stream = container.streams.video[0]
+            if not stream.duration:
+                return frames
+            duration = float(stream.duration * stream.time_base)
+            for i in range(count):
+                target = duration * (i + 1) / (count + 1)
+                container.seek(int(target / stream.time_base), stream=stream)
+                for frame in container.decode(stream):
+                    import io
+
+                    buf = io.BytesIO()
+                    frame.to_image().convert("RGB").save(buf, format="JPEG")
+                    frames.append(buf.getvalue())
+                    break
+    except Exception as exc:
+        print(f"Keyframe extraction skipped for {path.name}: {exc}")
+    return frames
+
+
 def _read_media(path: Path) -> str:
-    """Transcribes speech from a video or audio file with faster-whisper."""
-    model = _get_whisper_model()
-    segments, _ = model.transcribe(str(path))
-    return " ".join(segment.text.strip() for segment in segments)
+    """Transcribes speech with faster-whisper, and — for actual video files —
+    also captions a few evenly-spaced keyframes through the vision model, so
+    the visual content is searchable too, not just whatever was said aloud."""
+    from .vision import VisionUnavailable, get_vision_model
+
+    parts = []
+    try:
+        model = _get_whisper_model()
+        segments, _ = model.transcribe(str(path))
+        transcript = " ".join(segment.text.strip() for segment in segments)
+        if transcript.strip():
+            parts.append(f"Transcript: {transcript.strip()}")
+    except Exception as exc:
+        # A video with no audio track (a silent screen recording, e.g.)
+        # makes faster-whisper's decoder raise rather than just finding
+        # nothing to transcribe — treat it the same as "no speech found"
+        # instead of failing the whole ingest.
+        print(f"Transcription skipped for {path.name}: {exc}")
+
+    if path.suffix.lower() in VIDEO_SUFFIXES:
+        for i, frame_bytes in enumerate(_extract_keyframes(path)):
+            try:
+                caption = get_vision_model().caption_bytes(frame_bytes)
+                if caption.strip():
+                    parts.append(f"Visual content (frame {i + 1}): {caption.strip()}")
+            except VisionUnavailable:
+                break  # no vision model pulled — no point trying the rest
+            except Exception as exc:
+                print(f"Frame captioning skipped for {path.name} frame {i + 1}: {exc}")
+
+    return "\n\n".join(parts)
 
 
 def _ocr_pdf(path: Path) -> str:
@@ -190,6 +250,14 @@ SUFFIX_READERS = {
     ".flac": _read_media,
     ".ogg": _read_media,
 }
+
+
+def list_ingestible_paths(data_dir: str) -> list[Path]:
+    """Just the file paths `ingest()` would process, without reading any of
+    them — lets a caller (e.g. a background job) process one file at a time
+    and report per-file progress, instead of only an all-or-nothing result."""
+    directory = Path(data_dir)
+    return [p for p in sorted(directory.rglob("*")) if p.suffix.lower() in SUFFIX_READERS]
 
 
 def load_documents(data_dir: str) -> list[tuple[str, str, str]]:
