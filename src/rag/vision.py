@@ -55,6 +55,7 @@ class VisionModel:
         response = self.client.chat(
             model=model,
             messages=[{"role": "user", "content": CAPTION_PROMPT, "images": [_encode(image_path)]}],
+            think=False,  # extended reasoning adds real latency on CPU with no benefit for captioning
         )
         return response["message"]["content"]
 
@@ -70,6 +71,7 @@ class VisionModel:
         response = self.client.chat(
             model=model,
             messages=[{"role": "user", "content": prompt, "images": [_encode(image_path)]}],
+            think=False,
         )
         return response["message"]["content"]
 

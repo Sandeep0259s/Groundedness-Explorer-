@@ -145,3 +145,37 @@ def test_ask_and_multiturn_conversation(client, ollama_available):
     assert res2.status_code == 200
 
     client.delete("/api/labels/geo2")
+
+
+def test_system_set_model_rejects_bad_role(client, monkeypatch, tmp_path):
+    from src.rag import model_prefs
+
+    monkeypatch.setattr(model_prefs, "MODEL_PREF_FILE", tmp_path / ".model_choice.json")
+    res = client.post("/api/system/model", json={"model": "llama3.2:3b", "role": "bogus"})
+    assert res.status_code == 400
+
+
+def test_system_set_model_defaults_role_to_chat(client, monkeypatch, tmp_path):
+    from src.rag import model_prefs
+
+    monkeypatch.setattr(model_prefs, "MODEL_PREF_FILE", tmp_path / ".model_choice.json")
+    res = client.post("/api/system/model", json={"model": "llama3.2:3b"})
+    assert res.status_code == 200
+    assert res.json() == {"role": "chat", "active": "llama3.2:3b"}
+
+
+def test_system_models_endpoint_reports_capabilities_and_active(client, ollama_available, monkeypatch, tmp_path):
+    if not ollama_available:
+        pytest.skip("Ollama is not running — skipping tests that need a real Ollama server")
+
+    from src.rag import model_prefs
+
+    monkeypatch.setattr(model_prefs, "MODEL_PREF_FILE", tmp_path / ".model_choice.json")
+    res = client.get("/api/system/models")
+    assert res.status_code == 200
+    body = res.json()
+    assert isinstance(body["models"], list)
+    if body["models"]:
+        assert "capabilities" in body["models"][0]
+    assert "chat" in body["active"]
+    assert "vision" in body["active"]

@@ -36,7 +36,7 @@ one if it finds it — see "GPU usage" below.
 |---|---|---|
 | Documents | `.pdf`, `.txt`, `.md`, `.docx`, `.html` | |
 | Spreadsheets | `.csv`, `.xlsx` | Rows converted to `key: value` text |
-| Images | `.png`, `.jpg`, `.jpeg`, `.bmp`, `.tiff`, `.webp` | OCR via Tesseract |
+| Images | `.png`, `.jpg`, `.jpeg`, `.bmp`, `.tiff`, `.webp` | OCR via Tesseract + captioning via a vision model |
 | Video | `.mp4`, `.mov`, `.avi`, `.mkv`, `.webm` | Speech-to-text via faster-whisper |
 | Audio | `.mp3`, `.wav`, `.m4a`, `.flac`, `.ogg` | Speech-to-text via faster-whisper |
 
@@ -175,9 +175,13 @@ the API table below (`/api/system/*`).
 
 ## Switching models
 
-The **Model** panel in the sidebar lists every model currently pulled into
-Ollama and lets you pick which one answers questions — no restart, no config
-edit. The choice is persisted in `.model_choice.json` (gitignored).
+The **Model** panel in the sidebar lists every model currently pulled/created
+in Ollama and lets you pick which one answers questions — no restart, no
+config edit. Nothing about which models exist is hardcoded: `model_registry.py`
+asks Ollama itself what's locally available and what each one can do
+(`ollama.show(name).capabilities`), so a model you pull or create shows up
+automatically the next time you hit refresh (⟳) — no code change needed to
+start using it.
 
 **To use your own fine-tuned/custom model**, it needs to be Ollama-compatible
 (a GGUF checkpoint, or a model merged/exported to GGUF from your training
@@ -189,11 +193,64 @@ ollama create my-model -f Modelfile
 
 where `Modelfile` points at your `.gguf` file (see the
 [Ollama docs](https://github.com/ollama/ollama/blob/main/docs/modelfile.md)).
-Once created, hit the refresh (⟳) button next to the model dropdown — it'll
-show up alongside the built-in models, and selecting it makes it the active
-model for every subsequent question. You can also override the model for a
-single question via the API (`POST /api/ask` with a `model` field) without
-changing the global default.
+Once created, refresh the Model panel — it shows up alongside the rest, and
+selecting it makes it the active model for every subsequent question. You
+can also override the model for a single question via the API (`POST
+/api/ask` with a `model` field) without changing the global default.
+
+Model choice is **role-based**, not a single global value: there's an active
+model for `chat` (answering questions) and one for `vision` (see below), each
+persisted independently in `.model_choice.json` (gitignored). Adding a third
+role in the future (e.g. a swappable embedding model) is one function call
+in `model_prefs.py` — no new storage format, no new UI plumbing pattern.
+
+## Multimodal: understanding images, not just OCR-ing them
+
+Plain OCR only finds images that already contain text. A photo, a diagram,
+or a chart has nothing for OCR to extract — so this app also runs images
+through a vision-capable Ollama model, in two places:
+
+1. **At ingest** — every image gets OCR'd *and* captioned (`vision.py`'s
+   `caption()`), and both go into the indexed text. A text-free photo that
+   used to ingest as "0 chunks" now gets a real, searchable description.
+2. **At ask time** — if the best-matching retrieved source for a question is
+   an image, the app asks the vision model to look at the *actual image*
+   and answer directly (`pipeline.py`'s `_generate`), instead of only reusing
+   the cached ingest-time caption. This is genuine visual Q&A: "what color
+   is the shirt in pic2.jpeg" gets answered by looking at pic2.jpeg, not by
+   pattern-matching a paragraph written about it earlier.
+
+**No vision model is hardcoded.** `active_vision_model()` in `vision.py`
+resolves to (in order): an explicit `RAG_VISION_MODEL` env var → whatever
+you last picked in the Model panel's "Image understanding model" dropdown →
+the first vision-capable model `model_registry.py` finds already pulled.
+Pull any vision-capable model — `moondream` (small, fast, best for bulk
+captioning), `qwen3.5:4b` if you already have it, `llava`, `llama3.2-vision`,
+whatever — and it becomes selectable with no code change. If none is pulled
+yet, images still get OCR'd; captioning and visual Q&A are simply skipped
+rather than failing the ingest.
+
+**A real finding worth knowing about**: very small vision models can be
+excellent at open-ended captioning ("describe this image") while being
+surprisingly brittle on terse factual questions ("what color is the
+shirt?") — `moondream` in this project returned an empty response for the
+latter but a full, accurate description for the former, on the *same
+image*. `pipeline.py` treats an empty/near-empty vision-model answer as a
+signal to fall back to the text LLM using the retrieved context (which
+already includes that image's rich ingest-time caption) rather than
+surfacing a blank answer — another instance of the "small local models are
+brittle in specific, reproducible ways" pattern already documented for the
+NLI groundedness scorer below.
+
+**Speed vs. reliability is a real, visible tradeoff on CPU.** `moondream`
+captions/answers in seconds but is the model that hits the brittleness above
+most often; `qwen3.5:4b` answered every direct visual question correctly in
+testing but took 1–2+ minutes per question on CPU (it defaults to an
+extended "thinking" mode — `vision.py` passes `think=False` to skip that,
+which helps but doesn't erase the size difference). There's no universally
+"right" choice here: pick `moondream` for fast bulk captioning during
+ingest, switch to a larger vision model in the Model panel for a specific
+question you need answered accurately, and switch back after.
 
 ## Memory safety
 
@@ -262,13 +319,15 @@ src/
     vectorstore.py        Chroma persistent vector store wrapper (label-aware)
     labels.py             label registry (create/delete/list, ephemeral clearing)
     ingest.py             document loading, chunking, OCR/transcription, ingestion
-    llm.py                Ollama chat client wrapper (multi-turn aware)
+    llm.py                Ollama chat client wrapper (multi-turn, dynamic active model)
+    vision.py              image captioning + visual Q&A via the active vision model
     hallucination.py      NLI-based groundedness/hallucination scorer
     text_utils.py         shared sentence splitting
-    pipeline.py           ties retrieval + rerank + generation + scoring together
+    pipeline.py           ties retrieval + rerank + generation + scoring + vision together
     device.py             GPU detection, permission prompt, runtime device/perf switching
     system_stats.py        live CPU/RAM/GPU usage for the resource panel
-    model_prefs.py         persists the active Ollama model across restarts
+    model_registry.py      discovers pulled Ollama models + their capabilities (no hardcoded names)
+    model_prefs.py         persists the active model per role (chat/vision/...) across restarts
     memory_guard.py       memory headroom checks (upload cap, OCR backoff)
   api/
     main.py              FastAPI app — see endpoints below; serves frontend/
@@ -307,8 +366,8 @@ vectorstore/              persisted Chroma DB (gitignored)
 | `GET /api/system/devices` | List available compute devices (CPU + any detected GPU) |
 | `POST /api/system/device` | Switch device at runtime, reloads local models |
 | `GET/POST /api/system/performance` | Get/set CPU usage mode (`eco`/`balanced`/`max`) |
-| `GET /api/system/models` | List Ollama models pulled/created locally |
-| `POST /api/system/model` | Set the active model for future questions |
+| `GET /api/system/models` | List Ollama models with capabilities + active model per role |
+| `POST /api/system/model` | Set the active model for a role (`{"model", "role": "chat"\|"vision"}`) |
 
 ## Roadmap / further improvements
 

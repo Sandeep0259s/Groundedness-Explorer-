@@ -55,12 +55,24 @@ class RAGPipeline:
         # If the single best-matching source is an image, answer by actually
         # looking at it through a vision model rather than only its cached
         # OCR/caption text — genuine visual QA, not just retrieval over a
-        # canned description. Falls back to the normal text path if no
-        # vision-capable model is available.
+        # canned description. Small vision models can be brittle and return
+        # an empty/near-empty response for terse factual questions even
+        # though they caption the same image fine — when that happens, fall
+        # back to the text LLM, whose context already includes a rich
+        # ingest-time caption of the image and often still answers it.
         top_source = Path(hits[0]["source"])
         if top_source.suffix.lower() in IMAGE_SUFFIXES:
+            # Only pass *non-image* context alongside the picture itself —
+            # another retrieved image's caption describes a different photo
+            # entirely, and handing it to the vision model as "context"
+            # measurably confused it into blending details from both images.
+            extra_context = [
+                hit["text"] for hit in hits[1:] if Path(hit["source"]).suffix.lower() not in IMAGE_SUFFIXES
+            ]
             try:
-                return get_vision_model().answer(top_source, question, context_chunks[1:])
+                answer = get_vision_model().answer(top_source, question, extra_context)
+                if len(answer.strip()) >= 3:
+                    return answer
             except VisionUnavailable:
                 pass
 
