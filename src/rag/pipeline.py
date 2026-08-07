@@ -4,6 +4,7 @@ from pathlib import Path
 from .config import settings
 from .hallucination import get_scorer
 from .llm import OllamaLLM
+from .query_rewrite import rewrite_for_retrieval
 from .reranker import get_reranker
 from .structured_qa import SPREADSHEET_SUFFIXES, answer_structured_question
 from .vectorstore import VectorStore
@@ -25,9 +26,17 @@ class RAGPipeline:
         history: list[dict] | None = None,
         model: str | None = None,
     ) -> dict:
+        # Retrieval never sees conversation history on its own — a follow-up
+        # like "which continent is it on?" has no signal about what "it" is
+        # once embedded/BM25-searched in isolation. Rewriting it into a
+        # standalone question *for retrieval only* fixes that without
+        # changing what generation sees (still the original question + full
+        # history, below).
+        retrieval_question = rewrite_for_retrieval(question, history, model)
+
         candidate_k = max(top_k * settings.rerank_candidate_multiplier, top_k)
-        candidates = self.store.query_hybrid(question, top_k=candidate_k, label=label)
-        hits = self.reranker.rerank(question, candidates, top_k)
+        candidates = self.store.query_hybrid(retrieval_question, top_k=candidate_k, label=label)
+        hits = self.reranker.rerank(retrieval_question, candidates, top_k)
         context_chunks = [hit["text"] for hit in hits]
 
         if not context_chunks:
@@ -46,6 +55,7 @@ class RAGPipeline:
             "sources": hits,
             "groundedness": groundedness,
             "answer_mode": answer_mode,
+            "retrieval_question": retrieval_question if retrieval_question != question else None,
         }
 
     def _generate(
@@ -127,9 +137,11 @@ class RAGPipeline:
         ("done", dict) with the same shape ask() returns (answer, sources,
         groundedness, answer_mode) once generation finishes.
         """
+        retrieval_question = rewrite_for_retrieval(question, history, model)
+
         candidate_k = max(top_k * settings.rerank_candidate_multiplier, top_k)
-        candidates = self.store.query_hybrid(question, top_k=candidate_k, label=label)
-        hits = self.reranker.rerank(question, candidates, top_k)
+        candidates = self.store.query_hybrid(retrieval_question, top_k=candidate_k, label=label)
+        hits = self.reranker.rerank(retrieval_question, candidates, top_k)
         context_chunks = [hit["text"] for hit in hits]
 
         if not context_chunks:
@@ -189,4 +201,5 @@ class RAGPipeline:
             "sources": hits,
             "groundedness": groundedness,
             "answer_mode": answer_mode,
+            "retrieval_question": retrieval_question if retrieval_question != question else None,
         }

@@ -12,9 +12,11 @@ instead of just trusting the LLM. Documents are organized into user-defined
    boundaries, not arbitrary word offsets) and embedded with a local
    sentence-transformer model, then stored in a persistent Chroma vector
    database, tagged with whichever label you filed them under.
-2. **Retrieve (hybrid) + re-rank** — a question is matched against the
-   vector store two ways at once: embedding similarity (catches
-   paraphrases) and BM25 keyword search (catches exact names, part
+2. **Retrieve (hybrid) + re-rank** — a follow-up question is first rewritten
+   into a standalone one using conversation history ("how tall is it?" →
+   "how tall is the Eiffel Tower?") purely for retrieval purposes, then
+   matched against the vector store two ways at once: embedding similarity
+   (catches paraphrases) and BM25 keyword search (catches exact names, part
    numbers, dates that embeddings often miss), merged by reciprocal rank
    fusion. A second, purpose-built cross-encoder then re-scores those fused
    candidates for actual relevance and narrows them down to the final
@@ -367,12 +369,12 @@ pip install -r requirements-dev.txt
 pytest -v
 ```
 
-79 tests covering chunking, labels, memory guards, the groundedness scorer,
+82 tests covering chunking, labels, memory guards, the groundedness scorer,
 hybrid retrieval, structured-data QA safety checks, video keyframe
-extraction, conversation persistence, answer caching, RAGAS-style metrics,
-and the full API (upload → ingest → ask → delete). Tests that need a live
-LLM skip themselves automatically if Ollama isn't running, so the suite
-still passes in CI or on a machine without it set up.
+extraction, conversation persistence, answer caching, query rewriting,
+RAGAS-style metrics, and the full API (upload → ingest → ask → delete).
+Tests that need a live LLM skip themselves automatically if Ollama isn't
+running, so the suite still passes in CI or on a machine without it set up.
 
 ## Docker
 
@@ -409,6 +411,7 @@ src/
     memory_guard.py       memory headroom checks (upload cap, OCR backoff)
     conversation_store.py  SQLite-backed multi-turn conversation history
     answer_cache.py         in-memory cache for repeated stateless questions
+    query_rewrite.py        rewrites follow-ups into standalone questions for retrieval
     ragas_eval.py           faithfulness / answer relevancy / context precision
   api/
     main.py              FastAPI app — see endpoints below; serves frontend/
@@ -462,18 +465,15 @@ effort-to-value for a student project.
 streaming answers over SSE, hybrid BM25+embedding retrieval, structured-data
 QA for spreadsheets, persistent (SQLite-backed) conversation history, image
 captioning + visual Q&A, video keyframe captioning, per-role model
-switching, runtime GPU/CPU + performance control, and answer caching for
+switching, runtime GPU/CPU + performance control, answer caching for
 repeated stateless questions (measured ~57x faster on a cache hit — 20.5s
-to 0.36s — on the CPU this was built on).
+to 0.36s — on the CPU this was built on), and query rewriting for follow-up
+questions (see `query_rewrite.py` — a follow-up like "how tall is it?" gets
+rewritten to something like "how tall is the Eiffel Tower?" before
+retrieval only, so it actually finds the right chunk).
 
 **Still open:**
 
-- **Query rewriting for follow-ups** — a follow-up like "what about the
-  second one?" retrieves poorly on its own since it's missing the referent.
-  Rewriting it into a standalone question (using the LLM + conversation
-  history, now that history persists) before retrieval would fix multi-turn
-  retrieval accuracy specifically, which today's `history` param only helps
-  with at the *generation* stage, not retrieval.
 - **Per-document access control / multi-user support** — right now every
   label is visible to whoever opens the app. If this ever needs to serve
   more than one person, labels would need an owner and the API would need
