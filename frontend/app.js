@@ -614,9 +614,12 @@ function renderAnswer(pendingNode, result) {
     vision_fallback: "📄 Image model unavailable — answered from its saved description",
     structured: "🧮 Answered by computing over the spreadsheet",
   };
-  if (modeLabels[result.answer_mode]) {
+  const tagParts = [];
+  if (result.cached) tagParts.push("⚡ Cached answer");
+  if (modeLabels[result.answer_mode]) tagParts.push(modeLabels[result.answer_mode]);
+  if (tagParts.length) {
     modeTag.hidden = false;
-    modeTag.textContent = modeLabels[result.answer_mode];
+    modeTag.textContent = tagParts.join(" · ");
   }
 
   const sentenceList = article.querySelector(".sentence-list");

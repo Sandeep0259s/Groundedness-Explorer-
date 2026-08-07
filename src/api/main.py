@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from src.rag import answer_cache
 from src.rag import conversation_store
 from src.rag import device as device_module
 from src.rag import labels as labels_store
@@ -104,6 +105,7 @@ def _run_ingest_job(job_id: str):
         job["chunks_ingested"] = total_chunks
         job["sources"] = pipeline.store.list_sources()
         job["status"] = "done"
+        answer_cache.clear()
     except Exception as exc:
         job["error"] = str(exc)
         job["status"] = "error"
@@ -125,6 +127,7 @@ def _run_upload_job(job_id: str, saved_paths: list[Path]):
         job["results"] = results
         job["sources"] = pipeline.store.list_sources()
         job["status"] = "done"
+        answer_cache.clear()
     except Exception as exc:
         job["error"] = str(exc)
         job["status"] = "error"
@@ -177,6 +180,7 @@ def delete_document(source: str):
         Path(source).unlink(missing_ok=True)
     except OSError:
         pass
+    answer_cache.clear()
     return {"sources": pipeline.store.list_sources()}
 
 
@@ -214,6 +218,7 @@ def api_delete_label(name: str):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     pipeline.store.delete_label(name)
+    answer_cache.clear()
     return {"labels": labels_store.list_labels()}
 
 
@@ -222,6 +227,7 @@ def api_clear_label(name: str):
     pipeline: RAGPipeline = app.state.pipeline
     labels_store.clear_label_contents(name)
     pipeline.store.delete_label(name)
+    answer_cache.clear()
     return {"sources": pipeline.store.list_sources()}
 
 
@@ -299,15 +305,25 @@ def ask(request: AskRequest):
 
     conversation_id = request.conversation_id or uuid.uuid4().hex
     history = conversation_store.load_history(conversation_id)
-
     top_k = request.top_k or settings.top_k
-    result = pipeline.ask(
-        request.question,
-        top_k=top_k,
-        label=request.label,
-        history=history[-MAX_HISTORY_TURNS * 2 :],
-        model=request.model,
-    )
+
+    # Only cache stateless (no prior turns) questions — the same question
+    # text can mean different things mid-conversation, so caching on text
+    # alone would risk serving a cross-conversation wrong answer.
+    cached = answer_cache.get(request.question, request.label, request.model, top_k) if not history else None
+    if cached:
+        result = cached
+    else:
+        result = pipeline.ask(
+            request.question,
+            top_k=top_k,
+            label=request.label,
+            history=history[-MAX_HISTORY_TURNS * 2 :],
+            model=request.model,
+        )
+        if not history:
+            answer_cache.put(request.question, request.label, request.model, top_k, result)
+    result["cached"] = cached is not None
 
     history.append({"role": "user", "content": request.question})
     history.append({"role": "assistant", "content": result["answer"]})
@@ -335,19 +351,31 @@ def ask_stream(request: AskRequest):
     history = conversation_store.load_history(conversation_id)
     top_k = request.top_k or settings.top_k
 
+    cached = answer_cache.get(request.question, request.label, request.model, top_k) if not history else None
+
     def event_source():
-        final_result = None
-        for kind, payload in pipeline.ask_stream(
-            request.question,
-            top_k=top_k,
-            label=request.label,
-            history=history[-MAX_HISTORY_TURNS * 2 :],
-            model=request.model,
-        ):
-            if kind == "token":
-                yield f"event: token\ndata: {json.dumps(payload)}\n\n"
-            else:
-                final_result = payload
+        if cached:
+            # Nothing to actually stream — send the whole answer as one
+            # piece so a repeated question still renders instantly instead
+            # of re-running retrieval/rerank/generation from scratch.
+            final_result = {**cached, "cached": True}
+            yield f"event: token\ndata: {json.dumps(final_result['answer'])}\n\n"
+        else:
+            final_result = None
+            for kind, payload in pipeline.ask_stream(
+                request.question,
+                top_k=top_k,
+                label=request.label,
+                history=history[-MAX_HISTORY_TURNS * 2 :],
+                model=request.model,
+            ):
+                if kind == "token":
+                    yield f"event: token\ndata: {json.dumps(payload)}\n\n"
+                else:
+                    final_result = payload
+            final_result["cached"] = False
+            if not history:
+                answer_cache.put(request.question, request.label, request.model, top_k, final_result)
 
         final_result["conversation_id"] = conversation_id
         yield f"event: done\ndata: {json.dumps(final_result)}\n\n"
@@ -395,6 +423,7 @@ def system_set_device(request: DeviceRequest):
     get_reranker.cache_clear()
     get_scorer.cache_clear()
     app.state.pipeline = RAGPipeline()
+    answer_cache.clear()  # embeddings/reranking on the new device can reorder retrieval
 
     return {"active": device_module.get_current_device()}
 
@@ -447,6 +476,9 @@ def system_set_model(request: ModelRequest):
     # vision.py) — persisting the preference is all that's needed here, no
     # pipeline object to mutate or reload.
     model_prefs.save_active_model(request.role, name)
+    # A cached answer generated with the *previous* default model (request.model
+    # left unset) would otherwise keep being served under the new one.
+    answer_cache.clear()
     return {"role": request.role, "active": name}
 
 

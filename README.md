@@ -288,6 +288,29 @@ computed correctly. The real risk with this feature is a wrong *translation*
 of the question into code, which is a different failure mode than
 hallucination and isn't something the NLI scorer can measure.
 
+## Answer caching
+
+A repeated question — common when demoing or just re-testing something —
+skips the whole retrieve/rerank/generate pipeline via an in-memory cache in
+`answer_cache.py`, keyed on the exact `(question, label, model, top_k)`.
+Measured on the machine this was built on: **~20.5s → ~0.36s** on a cache
+hit, both non-streaming and streaming (`/api/ask` and `/api/ask/stream`
+both check it; a streaming cache hit sends the whole answer as one
+"token" event instead of a fake delay). Every response includes a `cached`
+boolean so this is visible, not silent — the UI shows a small "⚡ Cached
+answer" tag when it fires.
+
+Deliberately **not** applied to any question with conversation history —
+the same question text can mean something different mid-conversation
+("which continent is it on?"), and caching on text alone would risk
+serving a cross-conversation wrong answer. Only stateless (first-turn)
+questions are cached.
+
+The cache is cleared wholesale (not per-document) on any ingest/upload/
+delete/label mutation or chat/vision model switch — simple and always
+correct for a small local single-user cache; a stale answer is a worse
+failure mode than an occasional unnecessary recompute.
+
 ## Memory safety
 
 A best-effort safety net, not an OS-level guarantee, but designed so a
@@ -344,12 +367,12 @@ pip install -r requirements-dev.txt
 pytest -v
 ```
 
-72 tests covering chunking, labels, memory guards, the groundedness scorer,
+79 tests covering chunking, labels, memory guards, the groundedness scorer,
 hybrid retrieval, structured-data QA safety checks, video keyframe
-extraction, conversation persistence, RAGAS-style metrics, and the full API
-(upload → ingest → ask → delete). Tests that need a live LLM skip
-themselves automatically if Ollama isn't running, so the suite still passes
-in CI or on a machine without it set up.
+extraction, conversation persistence, answer caching, RAGAS-style metrics,
+and the full API (upload → ingest → ask → delete). Tests that need a live
+LLM skip themselves automatically if Ollama isn't running, so the suite
+still passes in CI or on a machine without it set up.
 
 ## Docker
 
@@ -385,6 +408,7 @@ src/
     model_prefs.py         persists the active model per role (chat/vision/...) across restarts
     memory_guard.py       memory headroom checks (upload cap, OCR backoff)
     conversation_store.py  SQLite-backed multi-turn conversation history
+    answer_cache.py         in-memory cache for repeated stateless questions
     ragas_eval.py           faithfulness / answer relevancy / context precision
   api/
     main.py              FastAPI app — see endpoints below; serves frontend/
@@ -419,7 +443,7 @@ vectorstore/              persisted Chroma DB (gitignored)
 | `POST /api/upload` | Upload files (background job, with per-file `progress`) into a label |
 | `POST /api/ingest` | Re-scan `data/raw/` (background job, with per-file `progress`) |
 | `GET /api/jobs/{id}` | Poll a background job's status |
-| `POST /api/ask` | Ask a question (`label`, `conversation_id`, `model` optional); response includes `answer_mode` (`text`/`vision`/`vision_fallback`/`structured`) |
+| `POST /api/ask` | Ask a question (`label`, `conversation_id`, `model` optional); response includes `answer_mode` (`text`/`vision`/`vision_fallback`/`structured`) and `cached` |
 | `POST /api/ask/stream` | Same as `/api/ask`, streamed as Server-Sent Events (`event: token` then `event: done`) |
 | `POST /api/conversations/{id}/clear` | Forget a conversation's history |
 | `GET /api/system/stats` | Live CPU/RAM/GPU usage, active device, performance mode |
@@ -438,7 +462,9 @@ effort-to-value for a student project.
 streaming answers over SSE, hybrid BM25+embedding retrieval, structured-data
 QA for spreadsheets, persistent (SQLite-backed) conversation history, image
 captioning + visual Q&A, video keyframe captioning, per-role model
-switching, runtime GPU/CPU + performance control.
+switching, runtime GPU/CPU + performance control, and answer caching for
+repeated stateless questions (measured ~57x faster on a cache hit — 20.5s
+to 0.36s — on the CPU this was built on).
 
 **Still open:**
 
@@ -452,10 +478,6 @@ switching, runtime GPU/CPU + performance control.
   label is visible to whoever opens the app. If this ever needs to serve
   more than one person, labels would need an owner and the API would need
   auth (even a simple API key per user).
-- **Answer caching** — identical questions against an unchanged label
-  currently re-run the whole pipeline. A cache keyed on
-  `(question, label, model)` invalidated on ingest would cut latency and
-  compute for repeated demo questions.
 - **A real sandbox for structured QA** — `structured_qa.py`'s restricted
   namespace + denylist is a reasonable local-app tradeoff (see its section
   above) but isn't a real sandbox; running the eval in a resource-limited
