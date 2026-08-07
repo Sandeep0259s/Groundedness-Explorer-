@@ -50,19 +50,18 @@ def main():
         return
 
     per_model_runs: dict[str, list[dict]] = {m: [] for m in models}
+    llm = OllamaLLM()
 
     for question in questions:
         print(f"\n{'=' * 90}\nQ: {question}\n{'=' * 90}")
         candidate_k = max(args.top_k * settings.rerank_candidate_multiplier, args.top_k)
-        candidates = store.query(question, top_k=candidate_k, label=args.label)
+        candidates = store.query_hybrid(question, top_k=candidate_k, label=args.label)
         hits = reranker.rerank(question, candidates, args.top_k)
         context_chunks = [hit["text"] for hit in hits]
 
         for model_name in models:
-            llm = OllamaLLM(model=model_name)
-
             start = time.perf_counter()
-            answer = llm.generate(question, context_chunks)
+            answer = llm.generate(question, context_chunks, model=model_name)
             latency = time.perf_counter() - start
 
             groundedness = scorer.score(answer, context_chunks)

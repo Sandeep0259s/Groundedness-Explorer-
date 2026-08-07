@@ -315,11 +315,27 @@ python -m scripts.evaluate_groundedness --calibrate
 
 # Compare multiple local models on the same questions: answers, groundedness, latency
 python -m scripts.compare_models --models llama3.2:3b,qwen3.5:4b --out results.json
+
+# RAGAS-style: faithfulness, answer relevancy, context precision — against the live pipeline
+python -m scripts.evaluate_ragas --questions questions.txt --out ragas_results.json
 ```
 
 `data/eval/groundedness_eval.jsonl` has 20 hand-labeled (context, sentence,
 grounded/hallucinated) pairs to start from — extend it with your own
 documents for a report-ready accuracy number.
+
+`scripts/evaluate_ragas.py` adds two RAGAS metrics `evaluate_groundedness.py`
+doesn't cover — **answer relevancy** (does the answer actually address the
+question, independent of whether its claims are grounded) and **context
+precision** (what fraction of retrieved chunks were actually useful, not
+just superficially similar) — alongside faithfulness, which is intentionally
+the same technique as the groundedness scorer above, reported under RAGAS's
+name for a reviewer who knows the standard metric. Run against this
+project's own tiny 3-document demo corpus with `top_k=4`, context precision
+comes out around 0.25 — a real, honest finding: with only a few documents
+loaded, most of `top_k` gets filled with genuinely irrelevant chunks just to
+reach the requested count. It's evidence the metric works, not a bug to fix
+in the demo data.
 
 ## Testing
 
@@ -328,10 +344,12 @@ pip install -r requirements-dev.txt
 pytest -v
 ```
 
-38 tests covering chunking, labels, memory guards, the groundedness scorer,
-and the full API (upload → ingest → ask → delete). Tests that need a live
-LLM skip themselves automatically if Ollama isn't running, so the suite
-still passes in CI or on a machine without it set up.
+72 tests covering chunking, labels, memory guards, the groundedness scorer,
+hybrid retrieval, structured-data QA safety checks, video keyframe
+extraction, conversation persistence, RAGAS-style metrics, and the full API
+(upload → ingest → ask → delete). Tests that need a live LLM skip
+themselves automatically if Ollama isn't running, so the suite still passes
+in CI or on a machine without it set up.
 
 ## Docker
 
@@ -352,7 +370,7 @@ src/
     config.py           settings (models, chunk size, top_k, thresholds)
     embeddings.py        sentence-transformer embedding wrapper
     reranker.py          cross-encoder relevance re-ranking
-    vectorstore.py        Chroma persistent vector store wrapper (label-aware)
+    vectorstore.py        Chroma vector store wrapper (label-aware, hybrid BM25+embedding retrieval)
     labels.py             label registry (create/delete/list, ephemeral clearing)
     ingest.py             document loading, chunking, OCR/transcription, ingestion
     llm.py                Ollama chat client wrapper (multi-turn, dynamic active model)
@@ -367,6 +385,7 @@ src/
     model_prefs.py         persists the active model per role (chat/vision/...) across restarts
     memory_guard.py       memory headroom checks (upload cap, OCR backoff)
     conversation_store.py  SQLite-backed multi-turn conversation history
+    ragas_eval.py           faithfulness / answer relevancy / context precision
   api/
     main.py              FastAPI app — see endpoints below; serves frontend/
   cli.py                 command-line entrypoint (ingest / ask)
@@ -378,6 +397,7 @@ frontend/
 scripts/
   evaluate_groundedness.py   accuracy eval + threshold calibration
   compare_models.py          multi-model benchmark (answers, groundedness, latency)
+  evaluate_ragas.py           faithfulness / answer relevancy / context precision eval
 tests/                    pytest suite (isolated from real data — see conftest.py)
 data/raw/                 documents, organized as data/raw/<label>/<file>
 data/eval/                 labeled groundedness evaluation set
