@@ -21,7 +21,8 @@ instead of just trusting the LLM. Documents are organized into user-defined
    top-k — each stage catches what the previous one misses.
 3. **Ask** — a local LLM (via [Ollama](https://ollama.com)) generates an
    answer grounded in those chunks, aware of the recent conversation history
-   for natural follow-up questions.
+   (persisted to SQLite, so an open conversation survives a restart) for
+   natural follow-up questions. Answers stream token-by-token over SSE.
 4. **Score** — the answer is split into sentences, and each is checked
    against the retrieved chunks with an NLI (natural language inference)
    cross-encoder. If a sentence isn't entailed by the context, it's flagged
@@ -365,6 +366,7 @@ src/
     model_registry.py      discovers pulled Ollama models + their capabilities (no hardcoded names)
     model_prefs.py         persists the active model per role (chat/vision/...) across restarts
     memory_guard.py       memory headroom checks (upload cap, OCR backoff)
+    conversation_store.py  SQLite-backed multi-turn conversation history
   api/
     main.py              FastAPI app — see endpoints below; serves frontend/
   cli.py                 command-line entrypoint (ingest / ask)
@@ -410,19 +412,22 @@ vectorstore/              persisted Chroma DB (gitignored)
 ## Roadmap / further improvements
 
 Everything below is a genuine next step, not filler — ordered roughly by
-effort-to-value for a student project:
+effort-to-value for a student project.
 
-- **Streaming answers** — Ollama supports token streaming; wiring that
-  through `/api/ask` (Server-Sent Events or a WebSocket) would make answers
-  appear incrementally instead of all at once, which reads as much faster.
+**Done** (kept here so the list doesn't misrepresent itself as all-future):
+streaming answers over SSE, hybrid BM25+embedding retrieval, structured-data
+QA for spreadsheets, persistent (SQLite-backed) conversation history, image
+captioning + visual Q&A, video keyframe captioning, per-role model
+switching, runtime GPU/CPU + performance control.
+
+**Still open:**
+
 - **Query rewriting for follow-ups** — a follow-up like "what about the
   second one?" retrieves poorly on its own since it's missing the referent.
   Rewriting it into a standalone question (using the LLM + conversation
-  history) before retrieval would fix multi-turn retrieval accuracy.
-- **Hybrid retrieval (BM25 + embeddings)** — pure embedding search misses
-  exact keyword/number matches (part numbers, names, dates). Adding a
-  keyword-based BM25 pass and merging it with vector search (reciprocal
-  rank fusion) is a well-known accuracy win for RAG.
+  history, now that history persists) before retrieval would fix multi-turn
+  retrieval accuracy specifically, which today's `history` param only helps
+  with at the *generation* stage, not retrieval.
 - **Per-document access control / multi-user support** — right now every
   label is visible to whoever opens the app. If this ever needs to serve
   more than one person, labels would need an owner and the API would need
@@ -431,11 +436,11 @@ effort-to-value for a student project:
   currently re-run the whole pipeline. A cache keyed on
   `(question, label, model)` invalidated on ingest would cut latency and
   compute for repeated demo questions.
-- **Structured-data QA** — CSV/XLSX are currently flattened to text chunks,
-  which loses the ability to actually compute over the data (sums, filters,
-  sorts). A text-to-SQL or pandas-agent path for spreadsheet labels would
-  handle "what's the total in column X" — style questions correctly, which
-  today's chunk-and-retrieve approach fundamentally can't.
+- **A real sandbox for structured QA** — `structured_qa.py`'s restricted
+  namespace + denylist is a reasonable local-app tradeoff (see its section
+  above) but isn't a real sandbox; running the eval in a resource-limited
+  subprocess would be the honest next step before this ever left a
+  single-user local context.
 - **GPU-aware batch sizing** — the reranker and NLI scorer currently send
   every candidate pair to the model in one batch; on a GPU with more
   headroom, batching more aggressively (and on CPU, less) would use the
@@ -444,6 +449,10 @@ effort-to-value for a student project:
   model pair (e.g. a smaller reranker/NLI model) alongside the performance
   mode, so a low-end CPU machine can trade some accuracy for speed instead
   of just fewer threads.
+- **A standardized RAG eval suite** — the custom groundedness metric is
+  good, reproducible material, but adding faithfulness/answer-relevance/
+  context-precision numbers alongside it (RAGAS-style) would give numbers a
+  reviewer already recognizes, not just a bespoke one.
 
 ## Notes for the writeup / evaluation
 

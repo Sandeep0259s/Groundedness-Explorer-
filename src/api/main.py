@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from src.rag import conversation_store
 from src.rag import device as device_module
 from src.rag import labels as labels_store
 from src.rag import model_prefs
@@ -38,7 +39,6 @@ async def lifespan(app: FastAPI):
         labels_store.clear_label_contents(name)
         app.state.pipeline.store.delete_label(name)
     app.state.jobs = {}
-    app.state.conversations = {}
     yield
 
 
@@ -298,7 +298,7 @@ def ask(request: AskRequest):
         raise HTTPException(status_code=400, detail="question must not be empty")
 
     conversation_id = request.conversation_id or uuid.uuid4().hex
-    history = app.state.conversations.setdefault(conversation_id, [])
+    history = conversation_store.load_history(conversation_id)
 
     top_k = request.top_k or settings.top_k
     result = pipeline.ask(
@@ -312,7 +312,8 @@ def ask(request: AskRequest):
     history.append({"role": "user", "content": request.question})
     history.append({"role": "assistant", "content": result["answer"]})
     if len(history) > MAX_HISTORY_TURNS * 2:
-        del history[: -MAX_HISTORY_TURNS * 2]
+        history = history[-MAX_HISTORY_TURNS * 2 :]
+    conversation_store.save_history(conversation_id, history)
 
     result["conversation_id"] = conversation_id
     return result
@@ -331,7 +332,7 @@ def ask_stream(request: AskRequest):
         raise HTTPException(status_code=400, detail="question must not be empty")
 
     conversation_id = request.conversation_id or uuid.uuid4().hex
-    history = app.state.conversations.setdefault(conversation_id, [])
+    history = conversation_store.load_history(conversation_id)
     top_k = request.top_k or settings.top_k
 
     def event_source():
@@ -351,17 +352,20 @@ def ask_stream(request: AskRequest):
         final_result["conversation_id"] = conversation_id
         yield f"event: done\ndata: {json.dumps(final_result)}\n\n"
 
-        history.append({"role": "user", "content": request.question})
-        history.append({"role": "assistant", "content": final_result["answer"]})
-        if len(history) > MAX_HISTORY_TURNS * 2:
-            del history[: -MAX_HISTORY_TURNS * 2]
+        updated_history = history + [
+            {"role": "user", "content": request.question},
+            {"role": "assistant", "content": final_result["answer"]},
+        ]
+        if len(updated_history) > MAX_HISTORY_TURNS * 2:
+            updated_history = updated_history[-MAX_HISTORY_TURNS * 2 :]
+        conversation_store.save_history(conversation_id, updated_history)
 
     return StreamingResponse(event_source(), media_type="text/event-stream")
 
 
 @app.post("/api/conversations/{conversation_id}/clear")
 def clear_conversation(conversation_id: str):
-    app.state.conversations.pop(conversation_id, None)
+    conversation_store.clear_history(conversation_id)
     return {"status": "cleared"}
 
 

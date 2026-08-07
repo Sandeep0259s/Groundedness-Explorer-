@@ -10,6 +10,7 @@ data/raw/*
 .groundedness_threshold.json
 labels.json
 data/labels.json
+conversations.sqlite3
 pip_install.log
 *.vsix
 .screenshots/
