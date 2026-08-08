@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src/ src/
 COPY frontend/ frontend/
 COPY scripts/ scripts/
+COPY data/eval/ data/eval/
 COPY data/raw/.gitkeep data/raw/.gitkeep
 
 ENV RAG_DEVICE=cpu

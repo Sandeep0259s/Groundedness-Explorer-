@@ -1,6 +1,12 @@
 services:
   app:
-    build: .
+    # Pulls the image GitHub Actions already built (see
+    # .github/workflows/docker-publish.yml) instead of building it here —
+    # `docker compose up` becomes a pull, not a 5-10 minute local build of
+    # torch/chromadb/sentence-transformers. Building from source instead
+    # (e.g. after editing the code) is one flag away:
+    #   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+    image: ghcr.io/sandeep0259s/groundedness-explorer-:latest
     ports:
       - "8000:8000"
     environment:

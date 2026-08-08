@@ -1,0 +1,7 @@
+services:
+  app:
+    # When both `build` and `image` are set for a service, Compose builds
+    # from source and tags the result with `image` — it does not try to
+    # pull first. Layered on top of docker-compose.yml via:
+    #   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+    build: .

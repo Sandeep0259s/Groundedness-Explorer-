@@ -6,6 +6,52 @@ every answer for how well it's actually supported by the retrieved context,
 instead of just trusting the LLM. Documents are organized into user-defined
 **labels** (collections) so retrieval can be scoped to just the ones you want.
 
+## Quick start (no Python install required)
+
+The entire stack — this app, and the Ollama LLM backend it talks to — runs
+in containers. If you have [Docker Desktop](https://docs.docker.com/get-docker/)
+installed, that's the only prerequisite — no Python, no manual dependency
+install:
+
+```powershell
+git clone https://github.com/Sandeep0259s/Groundedness-Explorer-.git
+cd Groundedness-Explorer-
+docker compose up
+```
+
+That pulls a pre-built image (built by this repo's own CI on every push —
+see `.github/workflows/docker-publish.yml`) instead of building one
+yourself, so there's no local `pip install` of torch/chromadb/
+sentence-transformers, no Tesseract/ffmpeg setup, no virtual environment —
+just a pull and a run. First time only, pull a model into the Ollama
+container:
+
+```powershell
+docker compose exec ollama ollama pull llama3.2:3b
+```
+
+Then open http://127.0.0.1:8000. Uploaded documents and the vector store
+persist in named volumes across restarts (see `docker-compose.yml`). GPU
+passthrough isn't configured by default (add `--gpus all` / the NVIDIA
+container toolkit if you want it) — CPU works fine for both.
+
+Editing the code and want to run *your* changes instead of the published
+image? Build locally instead of pulling:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+```
+
+**One-time repo-owner setup**: GitHub packages are sometimes created
+*private* by default even on a public repo, the first time CI publishes
+one — if `docker compose up` gets an auth/"denied" error pulling the
+image, go to the package's page (Profile → Packages →
+`groundedness-explorer-`) and set its visibility to public. After that,
+anyone can pull it with no login.
+
+Prefer to run it directly on your machine instead of in a container (e.g.
+to use a Python debugger)? See **Local development setup** below.
+
 ## How it works
 
 1. **Ingest** — documents are chunked (recursively, along paragraph/sentence
@@ -47,7 +93,11 @@ one if it finds it — see "GPU usage" below.
 
 A scanned/image-only PDF automatically falls back to OCR too.
 
-## Setup
+## Local development setup
+
+Everything below is for running the app directly on your machine (to
+develop/debug it) rather than in a container — skip this entirely if the
+Docker quick start above is all you need.
 
 ### 1. Install Ollama and pull a model
 
@@ -461,14 +511,9 @@ running, so the suite still passes in CI or on a machine without it set up.
 
 ## Docker
 
-```powershell
-docker compose up --build
-```
-
-Runs the app plus an Ollama container. Pull a model into it once with
-`docker compose exec ollama ollama pull llama3.2:3b`. GPU passthrough isn't
-configured by default (add `--gpus all` / the NVIDIA container toolkit if
-you want it) — CPU works fine for both.
+See **Quick start** at the top — `docker compose up` pulls the pre-built
+image; `docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+--build` builds from source instead.
 
 ## Project structure
 
