@@ -42,9 +42,42 @@ const statGpuRow = el("stat-gpu-row");
 const statGpuLabel = el("stat-gpu-label");
 const statGpuValue = el("stat-gpu-value");
 const statGpuBar = el("stat-gpu-bar");
+const apiKeyOverlay = el("api-key-overlay");
+const apiKeyForm = el("api-key-form");
+const apiKeyInput = el("api-key-input");
 
 let hasDocuments = false;
 let conversationId = null;
+
+/* ---------- API key auth (a no-op unless the server has RAG_API_KEY set) ---------- */
+const API_KEY_STORAGE = "rag_api_key";
+
+function showApiKeyPrompt() {
+  apiKeyOverlay.hidden = false;
+  apiKeyInput.focus();
+}
+
+apiKeyForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const key = apiKeyInput.value.trim();
+  if (!key) return;
+  localStorage.setItem(API_KEY_STORAGE, key);
+  apiKeyOverlay.hidden = true;
+  apiKeyInput.value = "";
+  location.reload(); // simplest way to retry everything with the key now attached
+});
+
+// Every API call goes through this instead of bare fetch() so the stored
+// key (if the server requires one) is attached automatically, and a 401
+// triggers the one-time prompt instead of every caller handling it itself.
+async function apiFetch(url, options = {}) {
+  const key = localStorage.getItem(API_KEY_STORAGE) || "";
+  const headers = new Headers(options.headers || {});
+  if (key) headers.set("X-API-Key", key);
+  const res = await fetch(url, { ...options, headers });
+  if (res.status === 401) showApiKeyPrompt();
+  return res;
+}
 
 /* ---------- theme ---------- */
 function applyTheme(theme) {
@@ -91,7 +124,7 @@ function showToast(message, kind = "info") {
 /* ---------- backend status ---------- */
 async function checkHealth() {
   try {
-    const res = await fetch("/api/health");
+    const res = await apiFetch("/api/health");
     if (!res.ok) throw new Error();
     statusDot.className = "status-dot online";
     statusText.textContent = "Backend online";
@@ -129,8 +162,8 @@ function escapeHtml(str) {
 async function refreshLabels() {
   try {
     const [labelsRes, docsRes] = await Promise.all([
-      fetch("/api/labels"),
-      fetch("/api/documents"),
+      apiFetch("/api/labels"),
+      apiFetch("/api/documents"),
     ]);
     const { labels } = await labelsRes.json();
     const { sources } = await docsRes.json();
@@ -218,7 +251,7 @@ labelGroups.addEventListener("click", async (e) => {
     const source = decodeURIComponent(btn.dataset.source);
     if (!confirm(`Remove "${basename(source)}" from the index?`)) return;
     try {
-      await fetch(`/api/documents?source=${encodeURIComponent(source)}`, { method: "DELETE" });
+      await apiFetch(`/api/documents?source=${encodeURIComponent(source)}`, { method: "DELETE" });
       showToast(`Removed ${basename(source)}`, "success");
       refreshLabels();
     } catch (err) {
@@ -229,7 +262,7 @@ labelGroups.addEventListener("click", async (e) => {
     const label = btn.dataset.label;
     if (!confirm(`Delete label "${label}" and everything in it? This can't be undone.`)) return;
     try {
-      const res = await fetch(`/api/labels/${encodeURIComponent(label)}`, { method: "DELETE" });
+      const res = await apiFetch(`/api/labels/${encodeURIComponent(label)}`, { method: "DELETE" });
       if (!res.ok) throw new Error((await res.json()).detail || "delete failed");
       showToast(`Deleted label "${label}"`, "success");
       refreshLabels();
@@ -240,7 +273,7 @@ labelGroups.addEventListener("click", async (e) => {
     const label = btn.dataset.label;
     if (!confirm(`Clear all files in "${label}"? This can't be undone.`)) return;
     try {
-      await fetch(`/api/labels/${encodeURIComponent(label)}/clear`, { method: "POST" });
+      await apiFetch(`/api/labels/${encodeURIComponent(label)}/clear`, { method: "POST" });
       showToast(`Cleared "${label}"`, "success");
       refreshLabels();
     } catch (err) {
@@ -255,7 +288,7 @@ labelCreateForm.addEventListener("submit", async (e) => {
   const name = newLabelInput.value.trim();
   if (!name) return;
   try {
-    const res = await fetch("/api/labels", {
+    const res = await apiFetch("/api/labels", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
@@ -286,7 +319,7 @@ function pollJob(jobId, { onDone, onError }) {
   const tick = async () => {
     let job;
     try {
-      const res = await fetch(`/api/jobs/${jobId}`);
+      const res = await apiFetch(`/api/jobs/${jobId}`);
       if (!res.ok) throw new Error(await res.text());
       job = await res.json();
     } catch (err) {
@@ -325,7 +358,7 @@ async function uploadFiles(fileList) {
 
   setIngesting(true);
   try {
-    const res = await fetch("/api/upload", { method: "POST", body: formData });
+    const res = await apiFetch("/api/upload", { method: "POST", body: formData });
     if (!res.ok) throw new Error(await res.text());
     const { job_id, skipped } = await res.json();
 
@@ -376,7 +409,7 @@ reingestBtn.addEventListener("click", async () => {
   reingestBtn.disabled = true;
   setIngesting(true);
   try {
-    const res = await fetch("/api/ingest", { method: "POST" });
+    const res = await apiFetch("/api/ingest", { method: "POST" });
     if (!res.ok) throw new Error(await res.text());
     const { job_id } = await res.json();
     showToast("Ingesting data/raw in the background — you can keep asking questions", "info");
@@ -411,7 +444,7 @@ topkInput.addEventListener("input", () => {
 /* ---------- performance: device, CPU/GPU usage, live resource panel ---------- */
 async function refreshDevices() {
   try {
-    const res = await fetch("/api/system/devices");
+    const res = await apiFetch("/api/system/devices");
     const { devices, active } = await res.json();
     deviceSelect.innerHTML = devices.map((d) => `<option value="${d.id}">${d.name}</option>`).join("");
     deviceSelect.value = active;
@@ -424,7 +457,7 @@ deviceSelect.addEventListener("change", async () => {
   const device = deviceSelect.value;
   deviceSelect.disabled = true;
   try {
-    const res = await fetch("/api/system/device", {
+    const res = await apiFetch("/api/system/device", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ device }),
@@ -441,7 +474,7 @@ deviceSelect.addEventListener("change", async () => {
 
 async function refreshPerformanceMode() {
   try {
-    const res = await fetch("/api/system/performance");
+    const res = await apiFetch("/api/system/performance");
     const { mode } = await res.json();
     performanceSelect.value = mode;
   } catch (err) {
@@ -452,7 +485,7 @@ async function refreshPerformanceMode() {
 performanceSelect.addEventListener("change", async () => {
   const mode = performanceSelect.value;
   try {
-    const res = await fetch("/api/system/performance", {
+    const res = await apiFetch("/api/system/performance", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ mode }),
@@ -470,7 +503,7 @@ performanceSelect.addEventListener("change", async () => {
 async function refreshModels() {
   modelRefreshBtn.disabled = true;
   try {
-    const res = await fetch("/api/system/models");
+    const res = await apiFetch("/api/system/models");
     if (!res.ok) throw new Error((await res.json()).detail || "could not reach Ollama");
     const { models, active } = await res.json();
 
@@ -506,7 +539,7 @@ const ROLE_LABELS = { chat: "Answering", vision_caption: "Captioning", vision_an
 
 async function setActiveModel(role, model) {
   try {
-    const res = await fetch("/api/system/model", {
+    const res = await apiFetch("/api/system/model", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model, role }),
@@ -528,7 +561,7 @@ modelRefreshBtn.addEventListener("click", refreshModels);
 // or lowering the performance mode, instead of guessing.
 async function refreshStats() {
   try {
-    const res = await fetch("/api/system/stats");
+    const res = await apiFetch("/api/system/stats");
     if (!res.ok) return;
     const stats = await res.json();
 
@@ -564,7 +597,7 @@ function scrollToBottom() {
 newChatBtn.addEventListener("click", async () => {
   if (conversationId) {
     try {
-      await fetch(`/api/conversations/${conversationId}/clear`, { method: "POST" });
+      await apiFetch(`/api/conversations/${conversationId}/clear`, { method: "POST" });
     } catch {
       // best-effort — starting a new conversation client-side still works either way
     }
@@ -732,7 +765,7 @@ async function askQuestion(question) {
 
   sendBtn.disabled = true;
   try {
-    const res = await fetch("/api/ask/stream", {
+    const res = await apiFetch("/api/ask/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

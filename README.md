@@ -384,6 +384,18 @@ a list of greeting words:
    nothing the cross-encoder considers relevant, so this generalizes to any
    off-topic message, not just a hardcoded set of greeting strings.
 
+## Optional API-key auth
+
+By default there's no auth at all — this app's normal posture is "runs on
+your own machine." Set `RAG_API_KEY` before exposing it beyond localhost (a
+shared network, a tunnel, a small-group demo link) and every `/api/*` call
+then requires a matching `X-API-Key` header; the static frontend mount
+deliberately bypasses the check (a browser has to load the page before it
+can prompt for a key). The UI handles this itself: any `401` triggers a
+one-time modal, the key gets saved in `localStorage`, and every subsequent
+request attaches it automatically via a single `apiFetch()` wrapper the
+whole frontend routes through.
+
 ## Memory safety
 
 A best-effort safety net, not an OS-level guarantee, but designed so a

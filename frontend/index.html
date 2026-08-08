@@ -10,7 +10,11 @@
   <div class="app">
     <aside class="sidebar" id="sidebar">
       <div class="brand">
-        <span class="brand-mark" aria-hidden="true">◆</span>
+        <svg class="brand-mark" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <circle class="pulse-ring" cx="12" cy="12" r="9.5" stroke="currentColor" stroke-width="1.4" opacity="0.35" />
+          <circle cx="12" cy="12" r="6" stroke="currentColor" stroke-width="1.6" />
+          <circle cx="12" cy="12" r="1.8" fill="currentColor" />
+        </svg>
         <span class="brand-name">Groundedness Explorer</span>
       </div>
 
@@ -197,6 +201,18 @@
   </div>
 
   <div class="toast-stack" id="toast-stack" aria-live="assertive"></div>
+
+  <div class="modal-overlay" id="api-key-overlay" hidden>
+    <form class="modal-card" id="api-key-form">
+      <h2>API key required</h2>
+      <p>This server has <code>RAG_API_KEY</code> set. Enter it once — it's
+        saved in this browser and sent with every request from here on.</p>
+      <input type="password" id="api-key-input" placeholder="API key" autocomplete="off" />
+      <div class="modal-actions">
+        <button class="btn btn-primary" type="submit">Save &amp; continue</button>
+      </div>
+    </form>
+  </div>
 
   <template id="message-template">
     <article class="message">
