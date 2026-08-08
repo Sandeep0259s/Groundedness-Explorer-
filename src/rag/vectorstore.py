@@ -15,6 +15,21 @@ def _tokenize(text: str) -> list[str]:
     return _TOKEN_RE.findall(text.lower())
 
 
+def _build_hit(doc_id: str, text: str, meta: dict, **extra) -> dict:
+    """One shared shape for every retrieval hit regardless of which leg
+    (embedding or BM25) found it — query() and _bm25_hits() used to build
+    this dict independently, which is exactly how a BM25-only hit ended up
+    missing the "distance" key vector hits always had."""
+    return {
+        "id": doc_id,
+        "text": text,
+        "source": meta.get("source", "unknown"),
+        "label": meta.get("label", DEFAULT_LABEL),
+        "distance": None,
+        **extra,
+    }
+
+
 class VectorStore:
     def __init__(self):
         self.client = chromadb.PersistentClient(path=settings.vectorstore_dir)
@@ -30,17 +45,11 @@ class VectorStore:
         where = {"label": label} if label else None
         result = self.collection.query(query_embeddings=[embedding], n_results=top_k, where=where)
 
-        hits = []
         ids = result["ids"][0] if result["ids"] else []
-        for doc_id, doc, meta, dist in zip(ids, result["documents"][0], result["metadatas"][0], result["distances"][0]):
-            hits.append({
-                "id": doc_id,
-                "text": doc,
-                "source": meta.get("source", "unknown"),
-                "label": meta.get("label", DEFAULT_LABEL),
-                "distance": dist,
-            })
-        return hits
+        return [
+            _build_hit(doc_id, doc, meta, distance=dist)
+            for doc_id, doc, meta, dist in zip(ids, result["documents"][0], result["metadatas"][0], result["distances"][0])
+        ]
 
     def _bm25_hits(self, question: str, label: str | None, top_k: int) -> list[dict]:
         if self.count() == 0:
@@ -61,21 +70,11 @@ class VectorStore:
         bm25 = BM25Okapi([_tokenize(d) for d in docs])
         scores = bm25.get_scores(_tokenize(question))
         ranked = sorted(range(len(docs)), key=lambda i: scores[i], reverse=True)[:top_k]
-        return [
-            {
-                "id": ids[i],
-                "text": docs[i],
-                "source": metas[i].get("source", "unknown"),
-                "label": metas[i].get("label", DEFAULT_LABEL),
-                # A BM25-only hit has no embedding distance — every hit dict
-                # must carry the same keys regardless of which leg found it,
-                # since downstream code (the frontend's `hit.distance`,
-                # reranker.rerank) treats "source" hits as one uniform shape.
-                "distance": None,
-                "bm25_score": float(scores[i]),
-            }
-            for i in ranked
-        ]
+        # A BM25-only hit has no embedding distance (_build_hit defaults it
+        # to None) — every hit dict still carries the same keys regardless
+        # of which leg found it, since downstream code (the frontend's
+        # `hit.distance`, reranker.rerank) treats hits as one uniform shape.
+        return [_build_hit(ids[i], docs[i], metas[i], bm25_score=float(scores[i])) for i in ranked]
 
     def query_hybrid(self, question: str, top_k: int = settings.top_k, label: str | None = None) -> list[dict]:
         """Combines embedding similarity with BM25 keyword search via

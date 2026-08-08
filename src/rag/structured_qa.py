@@ -8,21 +8,26 @@ the question into a single pandas expression against the real DataFrame,
 then evaluates it in a restricted namespace and returns the result.
 
 Security note: this executes model-generated code. `_safe_eval` restricts
-the namespace to a small allowlist and rejects anything that looks like an
-import/attribute-escape/IO attempt, but this is NOT a real sandbox (no
-process isolation, no resource limits) — an accepted tradeoff for a local,
-single-user app talking to a local model, not something to expose to
-untrusted multi-tenant use without adding real sandboxing (e.g. running the
-eval in a separate resource-limited subprocess).
+the namespace to a small allowlist (no `pandas` module, no dangerous
+builtins) and rejects anything that looks like an import/attribute-escape/
+IO attempt — and `_run_sandboxed` then runs that already-restricted eval in
+a separate child process with a hard timeout and (on POSIX) a memory
+ceiling, so a crash or a runaway loop in a generated expression can't take
+down or hang the API server itself. This is real process isolation, not
+just a namespace restriction — but it's still a single-machine, same-user
+sandbox (no container, no seccomp/network namespace), an accepted tradeoff
+for a local, single-user app talking to a local model you already trust.
 """
+import multiprocessing as mp
 import re
 from pathlib import Path
 
-import ollama
 import pandas as pd
 
-from . import model_prefs
-from .config import settings
+from . import ollama_client
+
+_EVAL_TIMEOUT_SECONDS = 5.0
+_EVAL_MEMORY_LIMIT_BYTES = 512 * 1024 * 1024
 
 SPREADSHEET_SUFFIXES = {".csv", ".xlsx"}
 
@@ -57,10 +62,23 @@ class StructuredQAError(RuntimeError):
     way — callers should fall back to the normal text pipeline."""
 
 
+_dataframe_cache: dict[Path, tuple[float, pd.DataFrame]] = {}
+
+
 def _load_dataframe(path: Path) -> pd.DataFrame:
-    if path.suffix.lower() == ".csv":
-        return pd.read_csv(path)
-    return pd.read_excel(path)
+    """Cached by (path, mtime) — every question against the same
+    unmodified spreadsheet used to re-read and re-parse the whole file from
+    scratch; a repeated question, or a second question about the same
+    file, now skips that entirely. The mtime check means an edited file
+    still gets re-parsed rather than silently serving stale data."""
+    mtime = path.stat().st_mtime
+    cached = _dataframe_cache.get(path)
+    if cached and cached[0] == mtime:
+        return cached[1]
+
+    df = pd.read_csv(path) if path.suffix.lower() == ".csv" else pd.read_excel(path)
+    _dataframe_cache[path] = (mtime, df)
+    return df
 
 
 def _extract_expression(raw: str) -> str:
@@ -80,9 +98,9 @@ def _generate_expression(df: pd.DataFrame, question: str, model: str | None = No
         sample=df.head(3).to_string(),
         question=question,
     )
-    active = model or model_prefs.load_active_model("chat", settings.ollama_model)
-    client = ollama.Client(host=settings.ollama_host)
-    response = client.chat(model=active, messages=[{"role": "user", "content": prompt}])
+    response = ollama_client.get_client().chat(
+        model=ollama_client.active_chat_model(model), messages=[{"role": "user", "content": prompt}]
+    )
     return _extract_expression(response["message"]["content"])
 
 
@@ -98,13 +116,56 @@ def _safe_eval(code: str, df: pd.DataFrame):
     return eval(code, namespace)  # noqa: S307 — restricted namespace, single expression, see module docstring
 
 
+def _sandboxed_worker(code: str, df: pd.DataFrame, queue: "mp.Queue") -> None:
+    try:
+        try:
+            import resource  # POSIX-only — no-ops out on Windows via the except below
+
+            resource.setrlimit(resource.RLIMIT_AS, (_EVAL_MEMORY_LIMIT_BYTES, _EVAL_MEMORY_LIMIT_BYTES))
+        except (ImportError, ValueError, OSError):
+            pass  # best-effort: no hard memory ceiling on this platform, still process-isolated
+        queue.put(("ok", _safe_eval(code, df)))
+    except Exception as exc:
+        queue.put(("error", str(exc)))
+
+
+def _run_sandboxed(code: str, df: pd.DataFrame, timeout: float = _EVAL_TIMEOUT_SECONDS):
+    """Runs _safe_eval in a separate process rather than this one — a real
+    process boundary and a hard timeout, on top of (not instead of)
+    _safe_eval's own namespace restrictions. This is what actually closes
+    the gap the module docstring used to just disclose: a crash or a
+    runaway loop in a generated expression can no longer take down or hang
+    the API server itself, only the disposable child process running it.
+    A memory ceiling is applied where the platform supports it (POSIX);
+    Windows still gets process isolation and the timeout, just not a hard
+    memory cap — `resource` doesn't exist there."""
+    ctx = mp.get_context("spawn")
+    queue = ctx.Queue()
+    proc = ctx.Process(target=_sandboxed_worker, args=(code, df, queue))
+    proc.start()
+    proc.join(timeout)
+
+    if proc.is_alive():
+        proc.terminate()
+        proc.join()
+        raise StructuredQAError(f"evaluation timed out after {timeout}s: {code!r}")
+
+    if queue.empty():
+        raise StructuredQAError(f"evaluation process exited unexpectedly (code {proc.exitcode}): {code!r}")
+
+    status, payload = queue.get()
+    if status == "error":
+        raise StructuredQAError(payload)
+    return payload
+
+
 def answer_structured_question(path: Path, question: str, model: str | None = None) -> str | None:
     """Returns an answer string, or None if this question couldn't be
     answered this way — the caller should fall back to the text pipeline."""
     try:
         df = _load_dataframe(path)
         code = _generate_expression(df, question, model)
-        result = _safe_eval(code, df)
+        result = _run_sandboxed(code, df)
     except Exception as exc:
         print(f"Structured QA fell back to text for {path.name}: {exc}")
         return None

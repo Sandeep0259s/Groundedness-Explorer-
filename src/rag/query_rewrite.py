@@ -10,10 +10,7 @@ text alone, so "which continent is it on?" retrieves on "continent" and
 specifically, without changing what generation sees — the final answer step
 still gets the original question plus the full history, unchanged.
 """
-import ollama
-
-from . import model_prefs
-from .config import settings
+from . import ollama_client
 
 _REWRITE_PROMPT = """Conversation so far:
 {history}
@@ -35,11 +32,10 @@ def rewrite_for_retrieval(question: str, history: list[dict] | None, model: str 
 
     transcript = "\n".join(f"{turn['role']}: {turn['content']}" for turn in history)
     prompt = _REWRITE_PROMPT.format(history=transcript, question=question)
-    active = model or model_prefs.load_active_model("chat", settings.ollama_model)
 
     try:
-        response = ollama.Client(host=settings.ollama_host).chat(
-            model=active,
+        response = ollama_client.get_client().chat(
+            model=ollama_client.active_chat_model(model),
             messages=[{"role": "user", "content": prompt}],
             think=False,
         )

@@ -19,20 +19,9 @@ Both use an LLM-as-judge, which is itself an approximation with known
 limitations (judge model quality, prompt sensitivity) — reported as such,
 not as ground truth.
 """
-import ollama
-
-from . import model_prefs
-from .config import settings
+from . import ollama_client
 from .embeddings import get_embedder
 from .hallucination import get_scorer
-
-
-def _judge_client() -> ollama.Client:
-    return ollama.Client(host=settings.ollama_host)
-
-
-def _active_chat_model(model: str | None) -> str:
-    return model or model_prefs.load_active_model("chat", settings.ollama_model)
 
 
 def faithfulness(answer: str, context_chunks: list[str]) -> float:
@@ -54,8 +43,8 @@ def answer_relevancy(question: str, answer: str, model: str | None = None, n: in
         return 0.0
 
     prompt = _REVERSE_QUESTION_PROMPT.format(n=n, answer=answer)
-    response = _judge_client().chat(
-        model=_active_chat_model(model), messages=[{"role": "user", "content": prompt}]
+    response = ollama_client.get_client().chat(
+        model=ollama_client.active_chat_model(model), messages=[{"role": "user", "content": prompt}]
     )
     candidates = [line.strip("-* ").strip() for line in response["message"]["content"].splitlines() if line.strip()]
     if not candidates:
@@ -84,8 +73,8 @@ def context_precision(question: str, context_chunks: list[str], model: str | Non
     if not context_chunks:
         return 0.0
 
-    active = _active_chat_model(model)
-    client = _judge_client()
+    active = ollama_client.active_chat_model(model)
+    client = ollama_client.get_client()
     relevant = 0
     for chunk in context_chunks:
         prompt = _RELEVANCE_JUDGE_PROMPT.format(question=question, chunk=chunk)

@@ -50,5 +50,11 @@ class Settings:
     max_upload_mb: int = int(os.environ.get("RAG_MAX_UPLOAD_MB", 300))
     min_free_memory_mb: int = int(os.environ.get("RAG_MIN_FREE_MEMORY_MB", 500))
 
+    # "" (default) means no auth — fine for the intended "runs on your own
+    # machine" use case. Set RAG_API_KEY to require an X-API-Key header on
+    # every /api/* call before exposing this beyond localhost (a shared
+    # network, a tunnel, a small-group demo link).
+    api_key: str = os.environ.get("RAG_API_KEY", "")
+
 
 settings = Settings()

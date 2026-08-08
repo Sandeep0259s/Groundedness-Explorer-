@@ -2,6 +2,7 @@ import csv
 import hashlib
 import re
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from pathlib import Path
 
@@ -132,15 +133,35 @@ def _read_media(path: Path) -> str:
         print(f"Transcription skipped for {path.name}: {exc}")
 
     if path.suffix.lower() in VIDEO_SUFFIXES:
-        for i, frame_bytes in enumerate(_extract_keyframes(path)):
-            try:
-                caption = get_vision_model().caption_bytes(frame_bytes)
-                if caption.strip():
+        frames = _extract_keyframes(path)
+        if frames:
+            # Captioning is an HTTP call to Ollama, not local CPU work, so
+            # threads (not processes) are the right tool — the GIL is
+            # released while waiting on the network either way. Note this
+            # is a real but *bounded* win: a local Ollama server with
+            # default settings still processes one request at a time per
+            # model, so it mainly saves round-trip idle time between calls
+            # rather than giving true 3x parallelism — it only becomes a
+            # full win if OLLAMA_NUM_PARALLEL is raised or multiple models
+            # are in play.
+            captions: list[str | None] = [None] * len(frames)
+            vision_model = get_vision_model()
+            with ThreadPoolExecutor(max_workers=min(len(frames), 4)) as executor:
+                future_to_index = {
+                    executor.submit(vision_model.caption_bytes, frame): i for i, frame in enumerate(frames)
+                }
+                for future in as_completed(future_to_index):
+                    i = future_to_index[future]
+                    try:
+                        captions[i] = future.result()
+                    except VisionUnavailable:
+                        pass  # no vision model pulled — the rest will fail the same way
+                    except Exception as exc:
+                        print(f"Frame captioning skipped for {path.name} frame {i + 1}: {exc}")
+
+            for i, caption in enumerate(captions):
+                if caption and caption.strip():
                     parts.append(f"Visual content (frame {i + 1}): {caption.strip()}")
-            except VisionUnavailable:
-                break  # no vision model pulled — no point trying the rest
-            except Exception as exc:
-                print(f"Frame captioning skipped for {path.name} frame {i + 1}: {exc}")
 
     return "\n\n".join(parts)
 

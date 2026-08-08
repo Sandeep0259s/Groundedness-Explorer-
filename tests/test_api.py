@@ -7,14 +7,6 @@ from fastapi.testclient import TestClient
 from src.rag.config import settings
 
 
-@pytest.fixture(scope="module")
-def client():
-    from src.api.main import app
-
-    with TestClient(app) as c:
-        yield c
-
-
 def _wait_for_job(client: TestClient, job_id: str, timeout: float = 30.0) -> dict:
     deadline = time.time() + timeout
     while time.time() < deadline:

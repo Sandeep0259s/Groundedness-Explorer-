@@ -1,7 +1,13 @@
 import pandas as pd
 import pytest
 
-from src.rag.structured_qa import StructuredQAError, _extract_expression, _safe_eval, answer_structured_question
+from src.rag.structured_qa import (
+    StructuredQAError,
+    _extract_expression,
+    _run_sandboxed,
+    _safe_eval,
+    answer_structured_question,
+)
 
 
 @pytest.fixture
@@ -56,6 +62,24 @@ def test_answer_structured_question_returns_none_on_bad_file(tmp_path):
     # must never raise out of answer_structured_question — always None or a string.
     result = answer_structured_question(bad_path, "what is the total?")
     assert result is None or isinstance(result, str)
+
+
+def test_run_sandboxed_computes_correctly(sales_df):
+    assert _run_sandboxed("df['Price'].sum()", sales_df) == pytest.approx(99.97)
+
+
+def test_run_sandboxed_still_rejects_dangerous_code(sales_df):
+    with pytest.raises(StructuredQAError):
+        _run_sandboxed("__import__('os').system('echo pwned')", sales_df)
+
+
+def test_run_sandboxed_times_out(sales_df):
+    # A real computation always takes longer than 0.001s to even spawn and
+    # import pandas in the child process — this forces the timeout path
+    # deterministically without needing a genuinely hung expression (a
+    # single eval() expression can't contain a while loop anyway).
+    with pytest.raises(StructuredQAError, match="timed out"):
+        _run_sandboxed("df['Price'].sum()", sales_df, timeout=0.001)
 
 
 def test_structured_qa_end_to_end(tmp_path, ollama_available):

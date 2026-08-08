@@ -31,3 +31,26 @@ def test_clear_history_removes_conversation():
 
 def test_clear_history_on_unknown_conversation_does_not_raise():
     conversation_store.clear_history("never-existed-conversation")
+
+
+def test_prune_removes_only_old_conversations(monkeypatch):
+    import sqlite3
+    from datetime import datetime, timedelta, timezone
+
+    fresh_id, stale_id = "test-conv-fresh", "test-conv-stale"
+    conversation_store.save_history(fresh_id, [{"role": "user", "content": "recent"}])
+    conversation_store.save_history(stale_id, [{"role": "user", "content": "old"}])
+
+    # Backdate the "stale" row's updated_at directly — save_history() always
+    # stamps "now", so this is the only way to simulate an old conversation.
+    old_timestamp = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+    conn = sqlite3.connect(conversation_store.DB_PATH)
+    conn.execute("UPDATE conversations SET updated_at = ? WHERE conversation_id = ?", (old_timestamp, stale_id))
+    conn.commit()
+    conn.close()
+
+    removed = conversation_store.prune_old_conversations(max_age_days=30)
+
+    assert removed >= 1
+    assert conversation_store.load_history(fresh_id) != []
+    assert conversation_store.load_history(stale_id) == []

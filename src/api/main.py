@@ -3,7 +3,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -29,6 +29,18 @@ FRONTEND_DIR = Path(__file__).resolve().parent.parent.parent / "frontend"
 UPLOAD_READ_CHUNK = 1024 * 1024  # stream uploads instead of loading whole file into memory
 
 
+def require_api_key(x_api_key: str | None = Header(default=None, alias="X-API-Key")) -> None:
+    """A no-op unless RAG_API_KEY is set — this app's default posture is
+    "runs on your own machine, no auth needed." Set the env var before
+    exposing it beyond localhost (a shared network, a tunnel, a demo link)
+    and every /api/* call needs a matching X-API-Key header. Deliberately
+    NOT applied to the static frontend mount below (an HTML/JS/CSS shell
+    isn't sensitive on its own) — the frontend prompts for the key once and
+    attaches it to its own API calls, see app.js."""
+    if settings.api_key and x_api_key != settings.api_key:
+        raise HTTPException(status_code=401, detail="missing or invalid X-API-Key header")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     device_module.apply_saved_performance_mode()
@@ -40,10 +52,11 @@ async def lifespan(app: FastAPI):
         labels_store.clear_label_contents(name)
         app.state.pipeline.store.delete_label(name)
     app.state.jobs = {}
+    conversation_store.prune_old_conversations()
     yield
 
 
-app = FastAPI(title="RAG + Hallucination Detector", lifespan=lifespan)
+app = FastAPI(title="RAG + Hallucination Detector", lifespan=lifespan, dependencies=[Depends(require_api_key)])
 
 
 MAX_HISTORY_TURNS = 6  # keep the prompt from growing unbounded in a long conversation
