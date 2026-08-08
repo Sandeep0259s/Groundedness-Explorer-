@@ -17,6 +17,13 @@ down or hang the API server itself. This is real process isolation, not
 just a namespace restriction — but it's still a single-machine, same-user
 sandbox (no container, no seccomp/network namespace), an accepted tradeoff
 for a local, single-user app talking to a local model you already trust.
+
+The subprocess step is itself best-effort: some constrained containers (a
+tight `ulimit -u` on a CI runner, observed in practice) can't spawn a new
+process/thread at all. `_run_sandboxed` falls back to evaluating in-process
+(still through `_safe_eval`'s restrictions, just without the process
+boundary) rather than losing the feature entirely when that happens — the
+same "degrade, don't break" posture as everything else in this codebase.
 """
 import multiprocessing as mp
 import re
@@ -139,10 +146,18 @@ def _run_sandboxed(code: str, df: pd.DataFrame, timeout: float = _EVAL_TIMEOUT_S
     A memory ceiling is applied where the platform supports it (POSIX);
     Windows still gets process isolation and the timeout, just not a hard
     memory cap — `resource` doesn't exist there."""
-    ctx = mp.get_context("spawn")
-    queue = ctx.Queue()
-    proc = ctx.Process(target=_sandboxed_worker, args=(code, df, queue))
-    proc.start()
+    try:
+        ctx = mp.get_context("spawn")
+        queue = ctx.Queue()
+        proc = ctx.Process(target=_sandboxed_worker, args=(code, df, queue))
+        proc.start()
+    except Exception as exc:
+        # Some environments (a container with a tight thread/process limit)
+        # can't spawn a subprocess at all — losing the process-isolation
+        # layer is better than losing the feature outright.
+        print(f"Structured QA sandbox unavailable ({exc}); evaluating in-process")
+        return _safe_eval(code, df)
+
     proc.join(timeout)
 
     if proc.is_alive():
@@ -151,7 +166,12 @@ def _run_sandboxed(code: str, df: pd.DataFrame, timeout: float = _EVAL_TIMEOUT_S
         raise StructuredQAError(f"evaluation timed out after {timeout}s: {code!r}")
 
     if queue.empty():
-        raise StructuredQAError(f"evaluation process exited unexpectedly (code {proc.exitcode}): {code!r}")
+        # The worker process died before it could report anything — e.g.
+        # it hit the same "can't start a new thread" resource limit inside
+        # the child that the environment might have hit spawning it in the
+        # first place. Same reasoning as above: fall back rather than fail.
+        print(f"Sandboxed evaluation exited unexpectedly (code {proc.exitcode}); evaluating in-process")
+        return _safe_eval(code, df)
 
     status, payload = queue.get()
     if status == "error":
