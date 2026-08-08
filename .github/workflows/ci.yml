@@ -23,5 +23,7 @@ jobs:
 
       - name: Run tests
         # No Ollama in CI — LLM-generation-dependent tests self-skip (see
-        # tests/test_api.py's ollama_available fixture); everything else runs.
-        run: pytest -v
+        # conftest.py's ollama_available fixture); everything else runs.
+        # `python -m pytest` (not bare `pytest`) so the project root is on
+        # sys.path even without pytest.ini's pythonpath option as backup.
+        run: python -m pytest -v
