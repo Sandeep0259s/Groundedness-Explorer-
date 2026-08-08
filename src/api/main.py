@@ -105,10 +105,14 @@ def _run_ingest_job(job_id: str):
         job["chunks_ingested"] = total_chunks
         job["sources"] = pipeline.store.list_sources()
         job["status"] = "done"
-        answer_cache.clear()
     except Exception as exc:
         job["error"] = str(exc)
         job["status"] = "error"
+    finally:
+        # Even a partially-failed batch may have already ingested earlier
+        # files into the store before the error — clear regardless so a
+        # cached answer never silently ignores documents that did land.
+        answer_cache.clear()
 
 
 def _run_upload_job(job_id: str, saved_paths: list[Path]):
@@ -127,10 +131,11 @@ def _run_upload_job(job_id: str, saved_paths: list[Path]):
         job["results"] = results
         job["sources"] = pipeline.store.list_sources()
         job["status"] = "done"
-        answer_cache.clear()
     except Exception as exc:
         job["error"] = str(exc)
         job["status"] = "error"
+    finally:
+        answer_cache.clear()
 
 
 @app.get("/api/health")
@@ -362,17 +367,29 @@ def ask_stream(request: AskRequest):
             yield f"event: token\ndata: {json.dumps(final_result['answer'])}\n\n"
         else:
             final_result = None
-            for kind, payload in pipeline.ask_stream(
-                request.question,
-                top_k=top_k,
-                label=request.label,
-                history=history[-MAX_HISTORY_TURNS * 2 :],
-                model=request.model,
-            ):
-                if kind == "token":
-                    yield f"event: token\ndata: {json.dumps(payload)}\n\n"
-                else:
-                    final_result = payload
+            try:
+                for kind, payload in pipeline.ask_stream(
+                    request.question,
+                    top_k=top_k,
+                    label=request.label,
+                    history=history[-MAX_HISTORY_TURNS * 2 :],
+                    model=request.model,
+                ):
+                    if kind == "token":
+                        yield f"event: token\ndata: {json.dumps(payload)}\n\n"
+                    else:
+                        final_result = payload
+            except Exception as exc:
+                # The 200 + headers are already sent by this point (streaming
+                # started) — a clean `event: error` lets the client show a
+                # real message instead of the connection just going silent.
+                yield f"event: error\ndata: {json.dumps(str(exc))}\n\n"
+                return
+
+            if final_result is None:
+                yield f"event: error\ndata: {json.dumps('no response was generated')}\n\n"
+                return
+
             final_result["cached"] = False
             if not history:
                 answer_cache.put(request.question, request.label, request.model, top_k, final_result)

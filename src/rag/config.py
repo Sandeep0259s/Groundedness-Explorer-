@@ -39,6 +39,11 @@ class Settings:
     groundedness_threshold: float = float(
         os.environ.get("RAG_GROUNDEDNESS_THRESHOLD", _read_calibrated_threshold())
     )
+    # Below this reranker score, a candidate is treated as "not actually
+    # relevant" rather than just "the best available" — lets a greeting or
+    # off-topic message get an honest "no relevant context" groundedness
+    # label instead of a misleading NLI score against irrelevant chunks.
+    relevance_threshold: float = float(os.environ.get("RAG_RELEVANCE_THRESHOLD", 0.0))
 
     device: str = os.environ.get("RAG_DEVICE", "")  # "", "cpu", "cuda", or "mps" — "" means auto-detect + ask
 

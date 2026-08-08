@@ -39,7 +39,14 @@ def main():
     args = parser.parse_args()
 
     models = [m.strip() for m in args.models.split(",") if m.strip()]
+    if not models:
+        print("No models given — pass at least one with --models.")
+        return
+
     questions = load_questions(args.questions)
+    if not questions:
+        print("No questions to evaluate (the --questions file was empty).")
+        return
 
     store = VectorStore()
     scorer = get_scorer()

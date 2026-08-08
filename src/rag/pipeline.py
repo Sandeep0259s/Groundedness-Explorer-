@@ -10,6 +10,14 @@ from .structured_qa import SPREADSHEET_SUFFIXES, answer_structured_question
 from .vectorstore import VectorStore
 from .vision import IMAGE_SUFFIXES, VisionUnavailable, get_vision_model
 
+# A vision model that can't answer a question tends to emit nothing at all
+# rather than a wrong partial answer (see vision.py's brittleness notes) —
+# so "non-empty" is the right bar for "usable", not an arbitrary length.
+# ask() and ask_stream() previously used different thresholds (>=3 chars vs.
+# non-empty) that had already drifted into disagreeing on short-but-correct
+# answers like "3" or "No" — both now share this one constant.
+_MIN_USABLE_VISION_ANSWER_CHARS = 1
+
 
 class RAGPipeline:
     def __init__(self):
@@ -48,7 +56,7 @@ class RAGPipeline:
             }
 
         answer, answer_mode = self._generate(question, hits, context_chunks, history=history, model=model)
-        groundedness = self._score(answer, answer_mode, context_chunks)
+        groundedness = self._score(answer, answer_mode, hits, context_chunks)
 
         return {
             "answer": answer,
@@ -93,7 +101,7 @@ class RAGPipeline:
             ]
             try:
                 answer = get_vision_model().answer(top_source, question, extra_context)
-                if len(answer.strip()) >= 3:
+                if len(answer.strip()) >= _MIN_USABLE_VISION_ANSWER_CHARS:
                     return answer, "vision"
             except VisionUnavailable:
                 pass
@@ -109,7 +117,7 @@ class RAGPipeline:
 
         return self.llm.generate(question, context_chunks, history=history, model=model), "text"
 
-    def _score(self, answer: str, answer_mode: str, context_chunks: list[str]) -> dict:
+    def _score(self, answer: str, answer_mode: str, hits: list[dict], context_chunks: list[str]) -> dict:
         if answer_mode == "structured":
             # NLI entailment compares two natural-language sentences — a
             # bare computed number like "700" against a prose chunk isn't a
@@ -120,6 +128,20 @@ class RAGPipeline:
             # of the question into code, not a hallucinated fact — a
             # different failure mode the NLI scorer can't measure at all.
             return {"overall_score": 1.0, "label": "computed", "sentences": []}
+
+        # The reranker already judges each candidate's relevance to the
+        # question (that's its whole job) — if it found *nothing* relevant
+        # (e.g. a greeting like "hi" retrieves only unrelated documents),
+        # the answer wasn't really "about the documents" in the first
+        # place. Scoring it via NLI against irrelevant chunks anyway
+        # produces a misleading "possibly hallucinated" label for what's
+        # actually just an off-topic reply — report "no relevant context
+        # found" instead, the same honest label already used when nothing
+        # is retrieved at all.
+        best_relevance = max((h.get("rerank_score", 0.0) for h in hits), default=0.0)
+        if best_relevance < settings.relevance_threshold:
+            return {"overall_score": 0.0, "label": "unknown", "sentences": []}
+
         return self.scorer.score(answer, context_chunks)
 
     def ask_stream(
@@ -195,7 +217,7 @@ class RAGPipeline:
                 yield "token", piece
 
         answer = "".join(collected)
-        groundedness = self._score(answer, answer_mode, context_chunks)
+        groundedness = self._score(answer, answer_mode, hits, context_chunks)
         yield "done", {
             "answer": answer,
             "sources": hits,

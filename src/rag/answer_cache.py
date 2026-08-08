@@ -16,12 +16,20 @@ Invalidated wholesale (not per-document) on any ingest/upload/delete/label
 mutation or model/device switch — simple and always correct for a small
 local single-user cache; a stale answer is a worse failure mode than an
 occasional unnecessary recompute.
+
+A single lock guards every read/write: FastAPI runs sync route handlers in
+a threadpool, so two requests can genuinely call into this module at the
+same moment — without it, one thread's eviction scan (`min(_cache, ...)`)
+racing another thread's insert/clear can raise "dictionary changed size
+during iteration".
 """
 import hashlib
 import json
+import threading
 import time
 
 _cache: dict[str, dict] = {}
+_lock = threading.Lock()
 _MAX_ENTRIES = 200  # small local app — bound memory rather than never evicting
 
 
@@ -31,22 +39,27 @@ def _key(question: str, label: str | None, model: str | None, top_k: int) -> str
 
 
 def get(question: str, label: str | None, model: str | None, top_k: int) -> dict | None:
-    entry = _cache.get(_key(question, label, model, top_k))
-    if entry is None:
-        return None
-    return {k: v for k, v in entry.items() if k != "_cached_at"}
+    with _lock:
+        entry = _cache.get(_key(question, label, model, top_k))
+        # Stored as {"result": ..., "cached_at": ...} precisely so a read
+        # never has to filter internal bookkeeping back out of the result —
+        # there's no key to accidentally leak into an API response.
+        return entry["result"] if entry else None
 
 
 def put(question: str, label: str | None, model: str | None, top_k: int, result: dict) -> None:
-    if len(_cache) >= _MAX_ENTRIES:
-        oldest_key = min(_cache, key=lambda k: _cache[k]["_cached_at"])
-        _cache.pop(oldest_key, None)
-    _cache[_key(question, label, model, top_k)] = {**result, "_cached_at": time.time()}
+    with _lock:
+        if len(_cache) >= _MAX_ENTRIES:
+            oldest_key = min(_cache, key=lambda k: _cache[k]["cached_at"])
+            _cache.pop(oldest_key, None)
+        _cache[_key(question, label, model, top_k)] = {"result": result, "cached_at": time.time()}
 
 
 def clear() -> None:
-    _cache.clear()
+    with _lock:
+        _cache.clear()
 
 
 def size() -> int:
-    return len(_cache)
+    with _lock:
+        return len(_cache)

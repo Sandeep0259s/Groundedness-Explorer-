@@ -6,10 +6,13 @@ from . import model_prefs
 from .config import settings
 
 SYSTEM_PROMPT = (
-    "You are a helpful assistant that answers questions using ONLY the provided context. "
-    "If the context does not contain the answer, say you don't know instead of guessing. "
-    "Answer in plain, direct sentences that state facts on their own — do not use bullet points, "
-    "headings, or preambles like 'According to the context'."
+    "You are a helpful assistant for a document Q&A tool. The user's message may be a genuine "
+    "question about the provided context, or just a greeting or casual remark ('hi', 'thanks', "
+    "'how are you') — reply naturally and briefly to the latter, with no need to reference the "
+    "context at all. For an actual question about the documents, answer using ONLY the provided "
+    "context, and if the context doesn't contain the answer, say you don't know instead of "
+    "guessing. Answer in plain, direct sentences — do not use bullet points, headings, or "
+    "preambles like 'According to the context'."
 )
 
 
@@ -19,7 +22,7 @@ class OllamaLLM:
 
     def _build_messages(self, question: str, context_chunks: list[str], history: list[dict] | None) -> list[dict]:
         context = "\n\n".join(f"[{i+1}] {chunk}" for i, chunk in enumerate(context_chunks))
-        prompt = f"Context:\n{context}\n\nQuestion: {question}\n\nAnswer using only the context above:"
+        prompt = f"Context:\n{context}\n\nUser message: {question}"
 
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         if history:

@@ -38,7 +38,17 @@ Reply with ONLY a single-line pandas expression that computes the answer
 No explanation, no markdown, no assignment, no print statement — just the
 bare expression, nothing else."""
 
-_BLOCKED_TOKENS = ("import", "__", "open(", "exec(", "eval(", "os.", "sys.", "subprocess", "globals", "locals")
+_BLOCKED_TOKENS = (
+    "import", "__", "open(", "exec(", "eval(", "compile(", "os.", "sys.", "subprocess",
+    "globals", "locals", "getattr", "setattr", "delattr",
+    # DataFrame/Series I/O methods (df.to_pickle(...), df.to_csv(...), ...) are never
+    # needed to *compute* an answer, only to write/exfiltrate — block the whole family
+    # rather than trying to enumerate every dangerous one-off individually.
+    "to_pickle", "to_csv", "to_excel", "to_html", "to_sql", "to_json", "to_parquet",
+    "to_feather", "to_hdf", "to_clipboard", "read_pickle", "read_html", "read_sql",
+    "read_json", "read_parquet", "read_feather", "read_hdf", "read_clipboard",
+    "http://", "https://", "ftp://", "requests", "urllib", "socket",
+)
 _SAFE_BUILTINS = {"len": len, "sum": sum, "min": min, "max": max, "round": round, "abs": abs, "sorted": sorted}
 
 
@@ -79,7 +89,12 @@ def _generate_expression(df: pd.DataFrame, question: str, model: str | None = No
 def _safe_eval(code: str, df: pd.DataFrame):
     if not code or any(token in code for token in _BLOCKED_TOKENS):
         raise StructuredQAError(f"generated code failed a safety check: {code!r}")
-    namespace = {"df": df, "pd": pd, "__builtins__": _SAFE_BUILTINS}
+    # `pd` is deliberately NOT exposed here: every legitimate aggregate/filter
+    # expression this feature needs only touches `df` itself, and leaving the
+    # full pandas module out closes the whole pd.read_pickle/pd.read_html/
+    # pd.io.* class of attacks in one move instead of trying to enumerate
+    # every dangerous module-level function by name.
+    namespace = {"df": df, "__builtins__": _SAFE_BUILTINS}
     return eval(code, namespace)  # noqa: S307 — restricted namespace, single expression, see module docstring
 
 

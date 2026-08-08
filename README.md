@@ -270,16 +270,24 @@ the computed result — tagged `answer_mode: "structured"` in the API and
 shown as "🧮 Answered by computing over the spreadsheet" in the UI.
 
 **Security note, stated plainly**: this executes model-generated code.
-`_safe_eval` runs it in a restricted namespace (only `df` and `pandas` are
-exposed, no builtins beyond a small allowlist) and rejects anything
-containing `import`, `__`, `open(`, `exec(`, `os.`/`sys.`, etc. before
-evaluating — but this is a **denylist plus a restricted namespace, not a
-real sandbox**: there's no process isolation or resource limit behind it.
-That's an accepted tradeoff for a local, single-user app talking to a local
-model you're already trusting to answer your questions — it should **not**
-be exposed to untrusted multi-tenant use without adding real sandboxing
-(e.g. running the eval in a resource-limited subprocess). `tests/test_structured_qa.py`
-has concrete examples of what it blocks.
+`_safe_eval` runs it in a restricted namespace — only `df` itself is
+exposed, no builtins beyond a small allowlist, and **the `pandas` module
+itself is deliberately left out of the namespace entirely**, not just
+denylisted by name. An earlier version exposed `pd` alongside a denylist of
+dangerous substrings (`import`, `os.`, etc.), which still let
+`pd.read_pickle(...)` / `pd.read_html(...)` / arbitrary network reads
+through — no legitimate aggregate/filter expression this feature needs
+ever calls `pd.` directly, so removing the module closes that whole class
+of attack in one move instead of trying to enumerate every dangerous
+function by name. The denylist is now defense-in-depth on top of that
+(also blocking the `df.to_pickle(...)`/`df.to_csv(...)` family, which
+remain reachable through `df` itself). This is still **not a real
+sandbox**: there's no process isolation or resource limit behind it — an
+accepted tradeoff for a local, single-user app talking to a local model you
+already trust, not something to expose to untrusted multi-tenant use
+without adding real sandboxing (e.g. running the eval in a resource-limited
+subprocess). `tests/test_structured_qa.py` has concrete examples of what it
+blocks.
 
 Groundedness scoring is skipped for structured answers and reported as
 `{"label": "computed", "overall_score": 1.0}` instead of run through the
@@ -289,6 +297,46 @@ misleading "possibly hallucinated" score for answers that were, in fact,
 computed correctly. The real risk with this feature is a wrong *translation*
 of the question into code, which is a different failure mode than
 hallucination and isn't something the NLI scorer can measure.
+
+## Other hardening from a full code-review pass
+
+A handful of real bugs surfaced from a systematic review of everything
+added this session, beyond the ones already called out inline above:
+
+- **Frontend XSS**: an uploaded filename or a document's own text content
+  was interpolated straight into `innerHTML` in a few places (the source
+  list, the image thumbnail's `alt` attribute) with no escaping — a
+  crafted filename could break out of its attribute and run script in the
+  browser. Fixed with a proper `escapeHtml()` used everywhere untrusted
+  text reaches the DOM as markup.
+- **Hybrid retrieval crash**: a BM25-only hit (no embedding match at all)
+  had no `distance` key, and the frontend unconditionally called
+  `hit.distance.toFixed(3)` — a `TypeError` on any question where keyword
+  search alone found the answer. Fixed by giving every hit a consistent
+  shape and rendering "keyword match" instead of a distance when there
+  isn't one.
+- **SQLite connections were never closed** in `conversation_store.py` (only
+  committed), leaking a file handle on every single question; fixed with a
+  proper context manager, plus a connect timeout so two near-simultaneous
+  requests on the same conversation wait for each other instead of raising
+  "database is locked."
+- **`answer_cache.py` had no locking** around its eviction scan, so two
+  concurrent requests could raise "dictionary changed size during
+  iteration"; fixed with a lock around every read/write.
+- **Two answer-mode thresholds had silently drifted**: `ask()` required a
+  vision answer to be ≥3 characters to count as usable, `ask_stream()`
+  accepted anything non-empty — meaning a correct short answer like "3" or
+  "No" was accepted by the streaming endpoint and rejected by the
+  non-streaming one for the same question. Unified to one shared constant.
+- **`query_hybrid()` had no memory guard**, unlike every other memory-heavy
+  path in this codebase — it pulls the whole matching collection into
+  Python to rebuild BM25 on every question. It now checks the same
+  `min_free_memory_mb` headroom the rest of the app respects and degrades
+  to embeddings-only instead of risking a crash.
+- Cache invalidation on ingest/upload now runs on failure too (a `finally`,
+  not just the success path) — a partially-failed batch may have already
+  ingested earlier files before erroring, and the old code left stale
+  answers cached against documents that did land.
 
 ## Answer caching
 
@@ -312,6 +360,29 @@ The cache is cleared wholesale (not per-document) on any ingest/upload/
 delete/label mutation or chat/vision model switch — simple and always
 correct for a small local single-user cache; a stale answer is a worse
 failure mode than an occasional unnecessary recompute.
+
+## Casual conversation, not just document Q&A
+
+Early on, a plain "hi" got refused with "I don't know" and labeled
+**possibly hallucinated** — a real, reproducible bug, not a hypothetical
+edge case. The cause: `llm.py`'s prompt forced *every* message through
+"answer using only the provided context," and the groundedness scorer then
+NLI-scored the refusal against whatever documents happened to be retrieved,
+regardless of whether the message was actually a question about them.
+
+Two fixes, both addressing the actual mechanism rather than pattern-matching
+a list of greeting words:
+
+1. The system prompt now tells the model the message might be a genuine
+   question *or* just a greeting/casual remark, and to answer the latter
+   naturally without needing the context at all.
+2. `pipeline.py` reuses a signal the reranker already computes for every
+   question — its own relevance score for each candidate — and reports
+   groundedness as **"no relevant context found"** (not "possibly
+   hallucinated") whenever the reranker's best candidate scores below
+   `RAG_RELEVANCE_THRESHOLD` (default `0.0`). A greeting reliably retrieves
+   nothing the cross-encoder considers relevant, so this generalizes to any
+   off-topic message, not just a hardcoded set of greeting strings.
 
 ## Memory safety
 

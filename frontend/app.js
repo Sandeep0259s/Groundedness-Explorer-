@@ -110,6 +110,19 @@ function isImageSource(path) {
   return /\.(png|jpe?g|bmp|tiff?|webp)$/i.test(path);
 }
 
+// Filenames come from user uploads and document text/LLM answers can echo
+// arbitrary content — anything from either ends up interpolated into
+// innerHTML template strings throughout this file, so it all needs
+// escaping before it touches the DOM as markup rather than text.
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 // Labels are the organizing unit; each carries its own document list. A
 // single /api/labels call gives us both — label metadata and, since sources
 // already know their label, everything needed to group them client-side.
@@ -163,7 +176,7 @@ function renderLabelGroups(labels, sources) {
             .map(
               (d) => `
               <li class="doc-item">
-                <span class="doc-item-name" title="${d.source}">${basename(d.source)}</span>
+                <span class="doc-item-name" title="${escapeHtml(d.source)}">${escapeHtml(basename(d.source))}</span>
                 <div class="doc-item-actions">
                   <span class="doc-item-chunks">${d.chunks} chunks</span>
                   <button class="doc-delete-btn" data-action="delete-doc" data-source="${encodeURIComponent(d.source)}" title="Remove file">×</button>
@@ -637,7 +650,7 @@ function renderAnswer(pendingNode, result) {
         li.title = "Click to jump to the source that backs this sentence";
       }
       li.innerHTML = `
-        <span class="sentence-text">${s.sentence}</span>
+        <span class="sentence-text">${escapeHtml(s.sentence)}</span>
         <span class="meter ${cls}">
           <span class="meter-fill ${cls}" style="width:${Math.round(s.entailment * 100)}%"></span>
         </span>
@@ -656,15 +669,19 @@ function renderAnswer(pendingNode, result) {
       li.className = "source-item";
       li.dataset.sourceIndex = index;
       const thumb = isImageSource(hit.source)
-        ? `<img class="source-item-thumb" src="/api/documents/file?source=${encodeURIComponent(hit.source)}" alt="${basename(hit.source)}" loading="lazy" />`
+        ? `<img class="source-item-thumb" src="/api/documents/file?source=${encodeURIComponent(hit.source)}" alt="${escapeHtml(basename(hit.source))}" loading="lazy" />`
         : "";
+      // A BM25-only hybrid hit has no embedding distance (see vectorstore.py) —
+      // show its relevance the only way it has one, rather than crashing on
+      // hit.distance.toFixed(3) with distance === null.
+      const relevance = hit.distance != null ? `distance ${hit.distance.toFixed(3)}` : "keyword match";
       li.innerHTML = `
         <div class="source-item-head">
-          <span>${basename(hit.source)}</span>
-          <span>distance ${hit.distance.toFixed(3)}</span>
+          <span>${escapeHtml(basename(hit.source))}</span>
+          <span>${relevance}</span>
         </div>
         ${thumb}
-        <div class="source-item-text">${hit.text}</div>
+        <div class="source-item-text">${escapeHtml(hit.text)}</div>
       `;
       sourceList.appendChild(li);
     });
@@ -752,6 +769,8 @@ async function askQuestion(question) {
           scrollToBottom();
         } else if (type === "done") {
           finalResult = JSON.parse(data);
+        } else if (type === "error") {
+          throw new Error(JSON.parse(data));
         }
       }
     }

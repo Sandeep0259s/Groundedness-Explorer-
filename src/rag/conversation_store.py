@@ -4,6 +4,7 @@ restart instead of silently losing its history.
 """
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,14 +13,22 @@ from .config import settings
 DB_PATH = Path(settings.vectorstore_dir).resolve().parent / "conversations.sqlite3"
 
 
-def _connect() -> sqlite3.Connection:
+@contextmanager
+def _connect():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS conversations ("
-        "conversation_id TEXT PRIMARY KEY, history TEXT NOT NULL, updated_at TEXT NOT NULL)"
-    )
-    return conn
+    # timeout: wait for a competing writer instead of immediately raising
+    # "database is locked" — sync FastAPI routes run in a threadpool, so two
+    # requests touching the same conversation_id can genuinely overlap.
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS conversations ("
+            "conversation_id TEXT PRIMARY KEY, history TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+        with conn:  # commits on clean exit, rolls back on exception
+            yield conn
+    finally:
+        conn.close()
 
 
 def load_history(conversation_id: str) -> list[dict]:

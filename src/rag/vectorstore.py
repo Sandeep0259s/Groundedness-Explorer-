@@ -6,6 +6,7 @@ from rank_bm25 import BM25Okapi
 from .config import settings
 from .embeddings import get_embedder
 from .labels import DEFAULT_LABEL
+from .memory_guard import available_mb
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
@@ -44,6 +45,13 @@ class VectorStore:
     def _bm25_hits(self, question: str, label: str | None, top_k: int) -> list[dict]:
         if self.count() == 0:
             return []
+        # Unlike every other memory-heavy path in this codebase (uploads,
+        # OCR), rebuilding BM25 pulls the *entire* matching collection into
+        # Python on every single question — degrade to embeddings-only
+        # instead of risking a crash when memory is tight, rather than
+        # hard-failing the whole question over a keyword-search bonus.
+        if available_mb() < settings.min_free_memory_mb:
+            return []
         where = {"label": label} if label else None
         result = self.collection.get(where=where, include=["documents", "metadatas"])
         ids, docs, metas = result["ids"], result["documents"], result["metadatas"]
@@ -59,6 +67,11 @@ class VectorStore:
                 "text": docs[i],
                 "source": metas[i].get("source", "unknown"),
                 "label": metas[i].get("label", DEFAULT_LABEL),
+                # A BM25-only hit has no embedding distance — every hit dict
+                # must carry the same keys regardless of which leg found it,
+                # since downstream code (the frontend's `hit.distance`,
+                # reranker.rerank) treats "source" hits as one uniform shape.
+                "distance": None,
                 "bm25_score": float(scores[i]),
             }
             for i in ranked

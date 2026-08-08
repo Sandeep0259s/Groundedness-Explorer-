@@ -39,6 +39,10 @@ def main():
     args = parser.parse_args()
 
     questions = load_questions(args.questions)
+    if not questions:
+        print("No questions to evaluate (the --questions file was empty).")
+        return
+
     pipeline = RAGPipeline()
 
     if pipeline.store.count() == 0:
