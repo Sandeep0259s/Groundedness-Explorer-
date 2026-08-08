@@ -46,7 +46,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 *private* by default even on a public repo, the first time CI publishes
 one — if `docker compose up` gets an auth/"denied" error pulling the
 image, go to the package's page (Profile → Packages →
-`groundedness-explorer-`) and set its visibility to public. After that,
+`groundedness-explorer`) and set its visibility to public. After that,
 anyone can pull it with no login.
 
 Prefer to run it directly on your machine instead of in a container (e.g.

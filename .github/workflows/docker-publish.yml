@@ -20,12 +20,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # GHCR image names must be lowercase; the repo name itself has
-      # capitals ("Groundedness-Explorer-"), so github.repository can't be
-      # used directly as the tag.
+      # A Docker image reference's path component must be lowercase and
+      # can't *end* in a separator character. The repo name itself is
+      # "Groundedness-Explorer-" — capitals (fixed by tr) AND a trailing
+      # hyphen (fixed by the sed strip) — so github.repository can't be
+      # used as a tag verbatim; every earlier attempt at this workflow
+      # failed on exactly this, independent of the torch/permissions fixes
+      # tried along the way, which is why "invalid reference format" a
+      # log dump finally exposed was the actual root cause all along.
       - name: Compute lowercase image name
         id: image
-        run: echo "name=${REGISTRY}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+        run: |
+          name="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]' | sed -E 's/[-_.]+$//')"
+          echo "name=${REGISTRY}/${name}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
