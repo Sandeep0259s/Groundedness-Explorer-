@@ -12,6 +12,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt .
+# This container always runs CPU-only (RAG_DEVICE=cpu below — no GPU in a
+# container, no TTY to ask permission for one anyway), but plain `pip
+# install torch` pulls the CUDA-enabled build by default, dragging in
+# several GB of nvidia-*/cuda-toolkit packages nothing here ever uses.
+# Installing the CPU-only wheel first means requirements.txt's own torch
+# dependency (via sentence-transformers) is already satisfied and skips
+# that entirely — smaller image, faster build, and enough disk headroom
+# to matter on constrained CI runners.
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/ src/
